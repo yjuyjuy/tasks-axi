@@ -115,6 +115,10 @@ const TAIL_DEP = new RegExp(
 const TAIL_REPO = /\s*\((?:[^()]*\+\s*)?repo:\s*([^)]+)\)\s*$/;
 const TAIL_KIND = /\s*\(kind:\s*([^)]+)\)\s*$/;
 const TAIL_PRIORITY = /\s*\(priority:\s*([0-4])\)\s*$/;
+// An opaque resumable session token. Parenthesis-free (the tag-region delimiter),
+// captured to end-of-tag; the CLI enforces the no-parens/single-line constraint
+// on write, so any legacy hand-edited value that reached here is still readable.
+const TAIL_RESUME = /\s*\(resume:\s*([^()]+)\)\s*$/;
 const TAIL_SINCE = new RegExp(`\\s*\\(since\\s+(${DATE})\\)\\s*$`);
 const TAIL_CLOSED = new RegExp(
   `\\s*\\((?:merged|reported|done|closed)\\s+(${DATE})\\)\\s*$`,
@@ -178,6 +182,7 @@ export interface ExtractedTags {
   created?: string;
   closed?: string;
   priority?: number;
+  resume?: string;
   hold?: Hold;
   links: TaskLink[];
 }
@@ -195,6 +200,7 @@ export function extractTags(rest: string): ExtractedTags {
   let created: string | undefined;
   let closed: string | undefined;
   let priority: number | undefined;
+  let resume: string | undefined;
   let holdReason: string | undefined;
   let holdKind: HoldKind | undefined;
   let holdUntil: string | undefined;
@@ -230,6 +236,13 @@ export function extractTags(rest: string): ExtractedTags {
     m = title.match(TAIL_PRIORITY);
     if (m) {
       if (priority === undefined) priority = Number(m[1]);
+      title = title.slice(0, m.index);
+      stripping = true;
+      continue;
+    }
+    m = title.match(TAIL_RESUME);
+    if (m) {
+      if (resume === undefined) resume = m[1].trim();
       title = title.slice(0, m.index);
       stripping = true;
       continue;
@@ -283,7 +296,7 @@ export function extractTags(rest: string): ExtractedTags {
         }
       : undefined;
 
-  return { title, kind, repo, deps, created, closed, priority, hold, links };
+  return { title, kind, repo, deps, created, closed, priority, resume, hold, links };
 }
 
 // ---------------------------------------------------------------------------
@@ -310,6 +323,7 @@ export function buildProse(task: Task): string {
     parts.push(`(kind: ${task.kind})`);
   }
   if (task.priority !== undefined) parts.push(`(priority: ${task.priority})`);
+  if (task.resume !== undefined) parts.push(`(resume: ${task.resume})`);
   if (task.state !== "done" && task.created) {
     parts.push(`(since ${task.created})`);
   }
@@ -477,6 +491,7 @@ function buildTask(
   if (tags.created) task.created = tags.created;
   if (tags.closed) task.closed = tags.closed;
   if (tags.priority !== undefined) task.priority = tags.priority;
+  if (tags.resume !== undefined) task.resume = tags.resume;
   if (tags.hold) task.hold = tags.hold;
   return task;
 }

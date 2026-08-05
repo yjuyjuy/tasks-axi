@@ -403,7 +403,7 @@ describe("crud commands", () => {
         const out = await listCommand([], b.ctx);
         expect(out).toMatch(/count: \d+/);
         expect(out).toContain("tasks[");
-        expect(out).toContain("{id,state,kind,repo,title}");
+        expect(out).toContain("{id,state,kind,repo,priority,title}");
         expect(() => decode(out)).not.toThrow();
         // the long body is never in list
         expect(out).not.toContain("Follow-up note added later");
@@ -575,6 +575,50 @@ describe("crud commands", () => {
         );
         expect(out).toContain("blocked_by");
         expect(out).toContain("created");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("shows the priority column by default", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(["p-q1", "ranked", "--priority", "3"], b.ctx);
+        const out = await listCommand([], b.ctx);
+        expect(out).toContain("{id,state,kind,repo,priority,title}");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("orders list output by priority, highest first", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(["low-q1", "low", "--priority", "1"], b.ctx);
+        await addCommand(["high-q1", "high", "--priority", "4"], b.ctx);
+        await addCommand(["mid-q1", "mid", "--priority", "2"], b.ctx);
+        await addCommand(["none-q1", "none"], b.ctx);
+        const out = await listCommand([], b.ctx);
+        const order = ["high-q1", "mid-q1", "low-q1", "none-q1"].map((id) =>
+          out.indexOf(id),
+        );
+        expect(order).toEqual([...order].sort((a, z) => a - z));
+        // the file itself keeps insertion order; only the listing is ranked
+        expect(b.read().indexOf("low-q1")).toBeLessThan(
+          b.read().indexOf("high-q1"),
+        );
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("ranks by priority even under a state filter", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(["low-q1", "low", "--priority", "0"], b.ctx);
+        await addCommand(["high-q1", "high", "--priority", "4"], b.ctx);
+        const out = await listCommand(["--state", "queued"], b.ctx);
+        expect(out.indexOf("high-q1")).toBeLessThan(out.indexOf("low-q1"));
       } finally {
         b.cleanup();
       }
@@ -879,6 +923,101 @@ describe("crud commands", () => {
         const out = await showCommand(["cert-cleanup"], b.ctx);
         expect(out).toContain("priority: 3");
         expect(b.read()).toContain("(priority: 3)");
+      } finally {
+        b.cleanup();
+      }
+    });
+  });
+
+  describe("resume token", () => {
+    it("persists a resume token through a fresh read and round-trips it", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(
+          ["lane-q1", "resumable lane", "--resume", "jcode-sess-abc123"],
+          b.ctx,
+        );
+        expect(b.read()).toContain("(resume: jcode-sess-abc123)");
+        const shown = await showCommand(["lane-q1"], b.ctx);
+        expect(shown).toContain("resume: jcode-sess-abc123");
+        // a re-read parses the tag back onto the task
+        const reread = makeBacklog(b.read());
+        try {
+          const out = await showCommand(["lane-q1"], reread.ctx);
+          expect(out).toContain("resume: jcode-sess-abc123");
+        } finally {
+          reread.cleanup();
+        }
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("surfaces the resume token via --fields resume", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(
+          ["lane-q1", "resumable lane", "--resume", "tok-1"],
+          b.ctx,
+        );
+        const out = await listCommand(["--fields", "resume"], b.ctx);
+        expect(out).toContain("resume");
+        expect(out).toContain("tok-1");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("update sets and replaces the resume token", async () => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await addCommand(["lane-q1", "lane"], b.ctx);
+        const set = await updateCommand(
+          ["lane-q1", "--resume", "tok-first"],
+          b.ctx,
+        );
+        expect(set).toContain("resume");
+        expect(b.read()).toContain("(resume: tok-first)");
+        const replace = await updateCommand(
+          ["lane-q1", "--resume", "tok-second"],
+          b.ctx,
+        );
+        expect(replace).toContain("resume");
+        expect(b.read()).toContain("(resume: tok-second)");
+        expect(b.read()).not.toContain("tok-first");
+        // idempotent when unchanged
+        const again = await updateCommand(
+          ["lane-q1", "--resume", "tok-second"],
+          b.ctx,
+        );
+        expect(again).toContain("already");
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it.each<[string, string]>([
+      ["parentheses", "tok(bad)"],
+      ["newline", "tok\nbad"],
+      ["empty", ""],
+    ])("rejects a resume token with %s", async (_case, value) => {
+      const b = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        await expect(
+          addCommand(["lane-q1", "lane", "--resume", value], b.ctx),
+        ).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      } finally {
+        b.cleanup();
+      }
+    });
+
+    it("leaves a record with no resume tag unchanged on round-trip", async () => {
+      const original = "# Backlog\n\n## Queued\n- [ ] plain-q1 - plain task (kind: ship) (since 2026-07-01)\n\n## Done\n";
+      const b = makeBacklog(original);
+      try {
+        // a read/re-render of an untagged task must not invent a resume tag
+        await updateCommand(["plain-q1", "--repo", "demo"], b.ctx);
+        expect(b.read()).not.toContain("(resume:");
       } finally {
         b.cleanup();
       }

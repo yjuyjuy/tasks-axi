@@ -15,6 +15,7 @@ import { renderMutation, stateLabel, taskToJson } from "../confirm.js";
 import { requireCtx, type TasksContext } from "../context.js";
 import {
   blockedIds,
+  byPriorityDesc,
   heldTasks,
   readyPublicFollowups,
   readyTasks,
@@ -588,13 +589,15 @@ export async function readyCommand(
   requirePositionals(args, 0, 0, READY_HELP.split("\n")[0]);
 
   const all = (await store.list({})).items;
-  let items = readyTasks(all);
+  let items = byPriorityDesc(readyTasks(all));
   const blocked = blockedIds(all);
-  let held = heldTasks(all).filter(
-    (t) =>
-      t.state === "queued" &&
-      t.kind !== PUBLIC_FOLLOWUP_KIND &&
-      !blocked.has(t.id),
+  let held = byPriorityDesc(
+    heldTasks(all).filter(
+      (t) =>
+        t.state === "queued" &&
+        t.kind !== PUBLIC_FOLLOWUP_KIND &&
+        !blocked.has(t.id),
+    ),
   );
   let publicFollowups = readyPublicFollowups(all);
   if (repo) items = items.filter((t) => t.repo === repo);

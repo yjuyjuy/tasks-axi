@@ -12,7 +12,7 @@ import { takeBody } from "../body.js";
 import { deriveLinks, extractTags } from "../backends/markdown-grammar.js";
 import { renderMutation, stateLabel, taskToJson } from "../confirm.js";
 import { requireCtx, type TasksContext } from "../context.js";
-import { blockedIds, heldTasks } from "../derive.js";
+import { blockedIds, byPriorityDesc, heldTasks } from "../derive.js";
 import { AxiError, notFound } from "../errors.js";
 import { parseFields } from "../fields.js";
 import { formatCountLine } from "../format.js";
@@ -48,6 +48,7 @@ flags:
   --kind <ship|scout|docs|...>, --repo <name>, --body <text> or --body-file <path>
   --start (place in In flight) | --queue (place in Queued, default)
   --blocked-by <id> (repeatable, must exist), --pr <url>, --report <path>, --priority <0-4>
+  --resume <token>   opaque resumable session token (harness/backend session id)
   --mint [--prefix <p>]   mint a slug-xx id from the title instead of passing one
   --json   print the resulting task as a JSON object
 examples:
@@ -78,6 +79,7 @@ flags:
   --title <text>, --body <text> or --body-file <path>
   --archive-body   with --body/--body-file, archive the previous body
   --repo <name>, --kind <name>, --priority <0-4>, --pr <url>, --report <path>
+  --resume <token>   set the opaque resumable session token (harness/backend session id)
   --json   print the resulting task as a JSON object
 examples:
   tasks-axi show nm-release-validation --full
@@ -176,6 +178,21 @@ function parseListStateFlag(raw: string | undefined): ListState | undefined {
   );
 }
 
+function requireResumeFlagValue(
+  value: string | undefined,
+): string | undefined {
+  const checked = requireNonEmptySingleLineFlagValue("--resume", value);
+  if (checked === undefined) return undefined;
+  if (/[()]/.test(checked)) {
+    throw new AxiError(
+      "--resume must not contain parentheses",
+      "VALIDATION_ERROR",
+      ["Pass --resume=... without parentheses"],
+    );
+  }
+  return checked.trim();
+}
+
 function parsePriority(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   if (!/^[0-4]$/.test(raw)) {
@@ -237,6 +254,7 @@ export async function addCommand(
   const pr = takeFlag(args, "--pr");
   const report = takeFlag(args, "--report");
   const priority = parsePriority(takeFlag(args, "--priority"));
+  const resume = requireResumeFlagValue(takeFlag(args, "--resume"));
   const deps = parseDeps(args);
   const json = takeBoolFlag(args, "--json");
   const start = takeBoolFlag(args, "--start");
@@ -335,6 +353,7 @@ export async function addCommand(
   if (repo) input.repo = repo;
   if (body !== undefined) input.body = body;
   if (priority !== undefined) input.priority = priority;
+  if (resume !== undefined) input.resume = resume;
 
   const task = await store.create(input);
   const all = (await store.list({})).items;
@@ -403,6 +422,11 @@ export async function listCommand(
   if (repo) matched = matched.filter((t) => t.repo === repo);
   if (kind) matched = matched.filter((t) => (t.kind ?? "task") === kind);
   if (onlyBlocked) matched = matched.filter((t) => blocked.has(t.id));
+
+  // Rank by priority (highest first) always, even under --state/--repo/--kind
+  // filters: ranked output is the point. A caller wanting raw file order reads
+  // data/backlog.md. Ties keep list position, so nothing else shifts.
+  matched = byPriorityDesc(matched);
 
   const total = matched.length;
   const items =
@@ -506,6 +530,7 @@ export async function updateCommand(
     takeFlag(args, "--kind"),
   );
   const priority = parsePriority(takeFlag(args, "--priority"));
+  const resume = requireResumeFlagValue(takeFlag(args, "--resume"));
   const pr = takeFlag(args, "--pr");
   const report = takeFlag(args, "--report");
   const positionals = requirePositionals(
@@ -544,6 +569,7 @@ export async function updateCommand(
     patch.kind = kind;
   }
   if (priority !== undefined) patch.priority = priority;
+  if (resume !== undefined) patch.resume = resume;
   const addLinks = parseLinks(pr, report);
   if (addLinks.length > 0) patch.addLinks = addLinks;
 

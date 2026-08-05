@@ -1,6 +1,6 @@
 import { encode } from "@toon-format/toon";
 import { requireCtx, type TasksContext } from "../context.js";
-import { blockedIds, readyTasks } from "../derive.js";
+import { blockedIds, byPriorityDesc, readyTasks } from "../derive.js";
 import type { Task } from "../model.js";
 import { DELIVERY_STATES, PUBLIC_FOLLOWUP_KIND } from "../public-followup.js";
 import { getSuggestions, withSuggestionGlobals } from "../suggestions.js";
@@ -32,8 +32,10 @@ export async function homeCommand(
   const all = (await store.list({})).items;
 
   const inFlight = all.filter((t) => t.state === "in_flight");
-  const queued = all.filter(
-    (t) => t.state === "queued" && t.kind !== PUBLIC_FOLLOWUP_KIND,
+  const queued = byPriorityDesc(
+    all.filter(
+      (t) => t.state === "queued" && t.kind !== PUBLIC_FOLLOWUP_KIND,
+    ),
   );
   const publicFollowups = all.filter(
     (t) => t.kind === PUBLIC_FOLLOWUP_KIND && t.public_followup,
