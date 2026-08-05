@@ -172,6 +172,24 @@ function normalizePriority(priority: number | undefined): number | undefined {
   return priority;
 }
 
+function normalizeResume(resume: string | undefined): string | undefined {
+  if (resume === undefined) return undefined;
+  const value = resume.trim();
+  if (value === "") {
+    throw new AxiError(
+      "Task resume token must not be empty",
+      "VALIDATION_ERROR",
+    );
+  }
+  if (/[\r\n()]/.test(value)) {
+    throw new AxiError(
+      "Task resume token must be a single line without parentheses",
+      "VALIDATION_ERROR",
+    );
+  }
+  return value;
+}
+
 function normalizeHold(hold: Hold | undefined): Hold | undefined {
   if (hold === undefined) return undefined;
   if (/[\r\n()]/.test(hold.reason)) {
@@ -289,6 +307,7 @@ function taskToInput(task: Task): TaskInput {
   if (task.body) input.body = task.body;
   if (task.hold) input.hold = { ...task.hold };
   if (task.priority !== undefined) input.priority = task.priority;
+  if (task.resume !== undefined) input.resume = task.resume;
   input.created = task.created ?? null;
   if (task.closed) input.closed = task.closed;
   if (task.public_followup) {
@@ -545,6 +564,10 @@ export class MarkdownStore implements Store {
     if (hold) task.hold = hold;
     const priority = normalizePriority(input.priority);
     if (priority !== undefined) task.priority = priority;
+    const resume = normalizeResume(
+      input.resume === null ? undefined : input.resume,
+    );
+    if (resume !== undefined) task.resume = resume;
     if (kind === PUBLIC_FOLLOWUP_KIND) {
       if (task.hold) {
         throw new AxiError(
@@ -736,6 +759,14 @@ export class MarkdownStore implements Store {
         if (task.priority !== priority) {
           task.priority = priority;
           markChanged("priority");
+        }
+      }
+      if (patch.resume !== undefined) {
+        const resume =
+          patch.resume === null ? undefined : normalizeResume(patch.resume);
+        if (task.resume !== resume) {
+          task.resume = resume;
+          markChanged("resume");
         }
       }
       if (patch.meta) {

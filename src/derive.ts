@@ -105,6 +105,24 @@ export function publicFollowupsByDeliveryState(
   );
 }
 
+/**
+ * Order tasks by priority for display and dispatch ranking. Higher priority
+ * first; tasks with no priority sort last; ties preserve the input (markdown
+ * list position) order, so nothing that is not priority-differentiated moves.
+ *
+ * Returns a new array; the input is not mutated. The on-disk file order is
+ * never touched - only listing/candidate output is ranked. firstmate's
+ * product-first, dependency, and host-ceiling overrides still win because they
+ * act on the candidate set, not on this ordering.
+ */
+export function byPriorityDesc(tasks: Task[]): Task[] {
+  const rank = (t: Task): number => (t.priority ?? -1);
+  return tasks
+    .map((task, index) => ({ task, index }))
+    .sort((a, b) => rank(b.task) - rank(a.task) || a.index - b.index)
+    .map(({ task }) => task);
+}
+
 /** The unresolved blocked-by edges for a task (blockers that are not done). */
 export function activeBlockers(task: Task, tasks: Task[]): string[] {
   const byId = new Map(tasks.map((t) => [t.id, t]));

@@ -76,8 +76,15 @@ export interface Task {
   deps: Dep[];
   /** Structured dispatch hold. Active holds keep queued work out of ready. */
   hold?: Hold;
-  /** 0-4, optional (borrowed from beads; firstmate orders by list position). */
+  /** 0-4, optional (borrowed from beads). Drives default list/ready ordering. */
   priority?: number;
+  /**
+   * Opaque, harness-defined resumable session token (a jcode/claude session id,
+   * or a herdr `pane:session` pair). tasks-axi never interprets it; it persists
+   * it so a dead or context-full lane can be resumed by id instead of
+   * reconstructed. Maps to the `(resume: ...)` inline tag.
+   */
+  resume?: string;
   /** Maps to `(since ...)`. */
   created?: string;
   updated?: string;
@@ -101,6 +108,7 @@ export interface TaskInput {
   deps?: Dep[];
   hold?: Hold;
   priority?: number;
+  resume?: string;
   created?: string | null;
   closed?: string;
   /** Accepted only with kind=public-followup through the dedicated command path. */
@@ -124,6 +132,8 @@ export interface TaskPatch {
   /** Set a structured hold, or clear it with null. */
   hold?: Hold | null;
   priority?: number;
+  /** Set the resumable session token, or clear it with null. */
+  resume?: string | null;
   meta?: Record<string, unknown>;
 }
 
@@ -134,6 +144,7 @@ export type TaskUpdateChange =
   | "repo"
   | "kind"
   | "priority"
+  | "resume"
   | "links"
   | "hold"
   | "meta";

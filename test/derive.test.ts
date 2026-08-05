@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activeBlockers,
   blockedIds,
+  byPriorityDesc,
   heldTasks,
   isHoldActive,
   readyTasks,
@@ -10,6 +11,10 @@ import type { Task } from "../src/model.js";
 
 function task(id: string, state: Task["state"], deps: Task["deps"] = []): Task {
   return { id, title: id, state, links: [], deps };
+}
+
+function ranked(id: string, priority?: number): Task {
+  return { id, title: id, state: "queued", links: [], deps: [], priority };
 }
 
 describe("derive", () => {
@@ -110,5 +115,46 @@ describe("derive", () => {
     expect(activeBlockers(withReasons[0], withReasons)).toEqual(["r"]);
     expect(blockedIds(withReasons).has("p")).toBe(true);
     expect(readyTasks(withReasons).map((t) => t.id)).toEqual([]);
+  });
+
+  describe("byPriorityDesc", () => {
+    it("orders higher priority first", () => {
+      const out = byPriorityDesc([
+        ranked("low", 1),
+        ranked("high", 4),
+        ranked("mid", 2),
+      ]);
+      expect(out.map((t) => t.id)).toEqual(["high", "mid", "low"]);
+    });
+
+    it("sorts tasks with no priority last", () => {
+      const out = byPriorityDesc([
+        ranked("none"),
+        ranked("p0", 0),
+        ranked("p3", 3),
+      ]);
+      expect(out.map((t) => t.id)).toEqual(["p3", "p0", "none"]);
+    });
+
+    it("keeps insertion order for equal priority (stable)", () => {
+      const out = byPriorityDesc([
+        ranked("first", 2),
+        ranked("second", 2),
+        ranked("third", 2),
+      ]);
+      expect(out.map((t) => t.id)).toEqual(["first", "second", "third"]);
+    });
+
+    it("keeps insertion order when no task carries a priority", () => {
+      const out = byPriorityDesc([ranked("a"), ranked("b"), ranked("c")]);
+      expect(out.map((t) => t.id)).toEqual(["a", "b", "c"]);
+    });
+
+    it("does not mutate the input array", () => {
+      const input = [ranked("low", 1), ranked("high", 4)];
+      const snapshot = input.map((t) => t.id);
+      byPriorityDesc(input);
+      expect(input.map((t) => t.id)).toEqual(snapshot);
+    });
   });
 });
