@@ -16,7 +16,7 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
 - `src/backends/markdown*.ts` — the only P1 backend.
 - `src/public-followup.ts` - authoritative versioned schema, strict privacy-safe validation, canonical encoding, immutable-field checks, relation/event readiness, and terminal-state invariants for `kind=public-followup`; `src/commands/public-followup.ts` owns its dedicated CLI state machine.
 - `src/commands/*` — one file per verb group; `src/view.ts` owns the read-side TOON projection; `src/confirm.ts` owns the write-side output (the `ok:` confirmation line, the `--json` payload, and `renderMutation`, which assembles both).
-- Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts`.
+- Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts` (minimal CLI-deferring stub generator).
 
 ## Markdown grammar invariants (the hard part — do not regress)
 
@@ -76,8 +76,8 @@ Any argv shape other than exactly one version flag falls through to `runAxiCli`,
 
 ## Build / test / ship
 
-- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (the generated `skills/tasks-axi/SKILL.md` is built from `DESCRIPTION` + `TOP_HELP` and must not drift — CI runs the check).
-- `skills/tasks-axi/SKILL.md` is generated — regenerate with `pnpm run build:skill` after changing the description or top-level help; never hand-edit it.
+- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (CI fails if `skills/tasks-axi/SKILL.md` drifts from `src/skill.ts`).
+- The shipped skill stays **minimal** and **defers to the CLI** for all actual guidance. Frontmatter (name/description/metadata) is the discovery surface; the body only says what tasks-axi is, when to reach for it, and pointers to `npx -y tasks-axi` (dashboard), `npx -y tasks-axi --help`, and `npx -y tasks-axi <command> --help`. tasks-axi CLI output is the single source of truth. Never re-duplicate CLI-owned commands, flags, or workflow steps into the skill - prefer a pointer. Never hand-edit `skills/tasks-axi/SKILL.md`; regenerate with `pnpm run build:skill`.
 - This repo is no-mistakes-gated; ship through `/no-mistakes`.
 
 ### Release & packaging (mirrors the `*-axi` siblings)
@@ -89,6 +89,8 @@ Any argv shape other than exactly one version flag falls through to `runAxiCli`,
   In a fresh clone, run `pnpm install --frozen-lockfile` before manual pack or publish.
   Verify with `npm pack --dry-run` (no source/test cruft; bin is `dist/bin/tasks-axi.js` with its shebang preserved by tsc).
 - **CI is a 3-OS matrix** (ubuntu/macos/windows) running install → build → lint → test → `build:skill --check`. The `Require no-mistakes` and `Guard generated files` checks gate every PR to `main`.
+- **The `Require no-mistakes` gate is a thin caller of a shared composite action.** `.github/workflows/no-mistakes-required.yml` delegates enforcement to `kunchenguid/no-mistakes/.github/actions/require-no-mistakes`, pinned to an immutable commit SHA and never `@main` (main is editable by the very PR the gate judges). Enforcement logic and its tests live upstream in the no-mistakes repo - change enforcement there rather than hand-copying a script between siblings, and bump this repo's pin in a deliberate separate PR. This repo still owns its `on:`, `paths-ignore`, `concurrency`, `permissions`, job name, and author-exemption `if:`.
+- The shared action binds the attestation to the PR's current head, so a PR whose body no-mistakes did not rewrite for that head goes red. That is the attestation contract, not a flake: push through `git push no-mistakes` so the body is refreshed. `on.pull_request.types` deliberately omits `synchronize` - the verdict is a pure function of the PR body, and a push-triggered run pins a failure to a head whose body the same pipeline run is about to fix.
 
 ## Follow-ups (out of P1 scope)
 
