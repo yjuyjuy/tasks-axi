@@ -1,7 +1,7 @@
 # tasks-axi — agent notes
 
 Agent-ergonomic task/backlog CLI in the `*-axi` family, built on `axi-sdk-js` and mirroring `gh-axi`.
-P1 ships only the markdown backend behind a `Store` seam; sqlite (P2) and remote trackers (P3) are deferred.
+The markdown backend and a Linear backend both sit behind the `Store` seam; sqlite (P2) and other remote trackers are deferred.
 
 ## Architecture
 
@@ -13,7 +13,8 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
 - `src/model.ts` — the `Task` data model (report §5).
 - `src/pr-url.ts` — `isPrUrl`, the one canonical PR-URL seam (GitHub `/pull/<n>` on github.com, Forgejo `/pulls/<n>` on any lowercase DNS host) shared by prose link derivation, `--pr` validation, and public-followup `pr_url`; near-misses derive as `doc` links, never `pr`.
 - `src/derive.ts` - worker `blocked` / `ready` / active `held` and public delivery readiness are derived in the CLI from `list` + the dep graph + hold date gates, never Store methods, so every backend gets them for free.
-- `src/backends/markdown*.ts` — the only P1 backend.
+- `src/backends/markdown*.ts` — the file-backed backend.
+- `src/backends/linear*.ts` — the Linear backend (see its own section below).
 - `src/public-followup.ts` - authoritative versioned schema, strict privacy-safe validation, canonical encoding, immutable-field checks, relation/event readiness, and terminal-state invariants for `kind=public-followup`; `src/commands/public-followup.ts` owns its dedicated CLI state machine.
 - `src/commands/*` — one file per verb group; `src/view.ts` owns the read-side TOON projection; `src/confirm.ts` owns the write-side output (the `ok:` confirmation line, the `--json` payload, and `renderMutation`, which assembles both).
 - Shared helpers copied from the family: `args.ts`, `body.ts`, `format.ts`, `fields.ts`, `toon.ts`, `suggestions.ts`, `skill.ts` (minimal CLI-deferring stub generator).
@@ -39,6 +40,29 @@ The CLI layer never knows which backend is active — it only talks to the `Stor
   If the lock looks stale, the error tells the user to remove `<path>.lock` only after confirming no `tasks-axi` process is running.
   Corruption-safety is guaranteed independently by atomic temp-file + rename writes, and a hand-edit landing between read and write is detected and refused.
   Reads do not lock.
+
+## Linear backend invariants (the second hard part)
+
+Selected with `backend = "linear"` plus a `[linear]` table naming `team` and `project`; that project is the home's whole partition.
+`LINEAR_API_KEY` comes from the environment, never from config.
+
+- **State is read and written by TYPE, never by display name.** A human can rename `In Progress` to anything at any moment, and every state still reports one of a fixed type set, so `linear-map.ts` keys on type (`STATE_BY_TYPE` / `TYPE_FOR_STATE`).
+  `canceled` maps to `done` (finished work that will not ship, and anything else would strand it in the dispatch queue); an unrecognized type maps to `queued` so new Linear states stay visible rather than disappearing.
+  A write picks the **lowest-positioned** state of the target type, which is the team's canonical entry point when several exist (`In Progress`, `PR Ready`, `Testing` are all `started`).
+- **The tasks-axi id stays the join key (D6).** Linear mints `DEV-44`, but `state/<id>` and `data/<id>/report.md` are addressed by slug, so the slug rides in the `fm-meta` block and `DEV-44` is carried in `task.meta.linear_id` for addressing mutations.
+  An issue created by hand in Linear has no slug and falls back to its identifier.
+- **`fm-meta` is a fenced flat `key: value` block** at the top of the description (`linear-meta.ts`) carrying only what Linear has no column for: `kind`, `created`, `resume`, the hold triple, typed report/doc links, dependency reasons, and the versioned public-followup record.
+  **Parsing is total**: an unknown key is dropped, an unterminated fence is treated as prose, and a wiped block still yields a valid task. A human editing a description in Linear must never make an issue unreadable.
+- **One batched snapshot per command, cached on disk.** Every read funnels through `load()`, which fetches the whole partition in one request (`linear-cache.ts`). This is a correctness requirement, not an optimization: `blocked`/`ready` are derived from the full graph, and a `show` loop is N separate processes, so an in-memory cache would buy nothing. Measured: 1 request cold, 0 warm.
+- **A mutation forces the next read to refetch** (`mustRefetch`), even inside the TTL. Without it a write is read back against a cache that predates it and appears to have failed. This was a real bug, caught only by live verification.
+- **Reads degrade, writes fail loud.** Every successful sync rewrites a read-only markdown mirror at the configured backlog path, so an offline read falls back to snapshot then mirror and returns the same shape a markdown home would.
+  A mutation calls `requireOnline` first and raises a structured `UNSUPPORTED` error, because there is no local store to write to and a silent success would diverge from the tracker.
+  Only a `NETWORK_ERROR` counts as offline; an auth or validation failure must surface.
+- **`rm` and `prune` archive, never delete.** Linear has no delete verb by design, and archiving is the exact analogue of appending to `done-archive.md`.
+- **Kind derivation matches the markdown backend** (explicit tag, else a leading `SHIP`/`SCOUT` word), so the same title yields the same kind in either backend.
+- **The client is loaded dynamically** via `import("linear-axi/client")` behind a shape guard (`linear-client.ts`). It is deliberately **not** a declared dependency: the npm name `linear-axi` is held by an unrelated package, and a static import would pull a network client into the import-light `bin/tasks-axi.ts`. A missing install fails with an actionable error.
+  Tests inject a fake client instead and assert request counts, so CI never touches the network.
+
 
 ## Conventions
 
@@ -95,7 +119,7 @@ Any argv shape other than exactly one version flag falls through to `runAxiCli`,
 ## Follow-ups (out of P1 scope)
 
 - Migrate firstmate's own `backlog.md` onto tasks-axi (a separate firstmate-repo change).
-- sqlite backend (P2); github/jira/linear backends (P3) — slot in behind the existing `Store` seam.
+- sqlite backend (P2); github/jira backends (P3) — slot in behind the existing `Store` seam.
 - Optional: count free-form Done lines toward the prune keep, or recognize compound ids (`a / b`).
 
 ## Maintaining this file
