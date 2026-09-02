@@ -1,4 +1,4 @@
-import { AxiError } from "../errors.js";
+import { AxiError, unsupported } from "../errors.js";
 import { validateDependencyId, validateId } from "../id.js";
 import type {
   Dep,
@@ -325,7 +325,10 @@ export class LinearStore implements Store {
    */
   private async requireOnline(action: string): Promise<Snapshot> {
     try {
-      return await this.fetchSnapshot();
+      // Reuse the freshly fetched snapshot for this command's reads: the write
+      // path still calls `invalidate()` afterwards, so the NEXT read refetches.
+      this.snapshot = await this.fetchSnapshot();
+      return this.snapshot;
     } catch (error) {
       if (isOffline(error)) {
         throw new AxiError(
@@ -581,6 +584,11 @@ export class LinearStore implements Store {
 
   async update(id: string, patch: TaskPatch): Promise<TaskUpdateResult> {
     await this.requireOnline(`update "${id}"`);
+    if (patch.archiveBody) {
+      // There is no note archive on this backend, so honouring the flag would
+      // silently destroy the superseded body instead of preserving it.
+      throw unsupported("--archive-body", this.capabilities().backend);
+    }
     const { key, task } = await this.requireIssueKey(id);
 
     if (
@@ -810,6 +818,11 @@ export class LinearStore implements Store {
     }
     if (task.deps.some((d) => d.type === dep.type && d.id === dep.id)) {
       return false;
+    }
+    if (dep.type !== "blocked-by") {
+      // Linear models only blocking relations; anything else would post a
+      // relation with no issue id and report a success that never happened.
+      throw unsupported(`"${dep.type}" dependencies`, this.capabilities().backend);
     }
     const [blockerKey] = await this.resolveBlockerKeys([dep]);
     await this.createRelation(key, blockerKey);

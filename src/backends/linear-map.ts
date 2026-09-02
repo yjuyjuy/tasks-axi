@@ -59,10 +59,14 @@ function repoFromLabels(labels: string[]): string | undefined {
  * Linear's priority scale runs 0 = "No priority", 1 = Urgent .. 4 = Low, while
  * tasks-axi's runs 0..4 with higher meaning more urgent. Mapping is therefore
  * an inversion, not a copy, and Linear's 0 means "unset" rather than "lowest".
+ *
+ * Linear rejects any value above 4, so tasks-axi 0 and 1 both fold onto Linear
+ * 4 (Low): a writable lowest priority matters more than an injective mapping,
+ * and every other value still round-trips.
  */
 export function priorityToLinear(priority: number | undefined): number {
   if (priority === undefined) return 0;
-  return 5 - Math.max(0, Math.min(4, priority));
+  return 5 - Math.max(1, Math.min(4, priority));
 }
 
 export function priorityFromLinear(priority: number): number | undefined {

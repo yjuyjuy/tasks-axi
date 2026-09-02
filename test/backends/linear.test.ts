@@ -493,6 +493,60 @@ describe("linear backend", () => {
     });
   });
 
+  describe("priority mapping", () => {
+    it("writes every priority inside Linear's 0-4 range and reads it back", async () => {
+      const store = makeStore(0);
+      for (const priority of [0, 1, 2, 3, 4]) {
+        const id = `p-${priority}`;
+        await store.create({ id, title: "t", priority });
+        const issue = fake.issues.find((node) => node.title === "t" && node.description?.includes(`slug: ${id}`));
+        expect(issue!.priority).toBeGreaterThanOrEqual(0);
+        expect(issue!.priority).toBeLessThanOrEqual(4);
+        // tasks-axi 0 and 1 both fold onto Linear's lowest real priority.
+        expect((await store.get(id))?.priority).toBe(Math.max(1, priority));
+      }
+    });
+
+    it("leaves priority unset when none is given, in both directions", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "no-prio", title: "t" });
+      expect(fake.issues[0]!.priority).toBe(0);
+      expect((await store.get("no-prio"))?.priority).toBeUndefined();
+    });
+
+    it("keeps an updated priority inside Linear's range", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "upd", title: "t", priority: 2 });
+      for (const priority of [0, 1, 2, 3, 4]) {
+        await store.update("upd", { priority });
+        expect(fake.issues[0]!.priority).toBeGreaterThanOrEqual(0);
+        expect(fake.issues[0]!.priority).toBeLessThanOrEqual(4);
+        expect((await store.get("upd"))?.priority).toBe(Math.max(1, priority));
+      }
+    });
+  });
+
+  describe("unsupported operations", () => {
+    it("rejects --archive-body rather than discarding the superseded body", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "arch", title: "t", body: "original body" });
+      await expect(
+        store.update("arch", { body: "replacement", archiveBody: true }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+      expect((await store.get("arch"))?.body).toBe("original body");
+    });
+
+    it("rejects a non-blocking dependency instead of posting a malformed relation", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "child", title: "t" });
+      await store.create({ id: "parent", title: "t2" });
+      await expect(
+        store.addDep("child", { type: "parent", id: "parent" }),
+      ).rejects.toMatchObject({ code: "UNSUPPORTED" });
+      expect((await store.get("child"))?.deps).toEqual([]);
+    });
+  });
+
   describe("config resilience", () => {
     it("ignores a hand-edited description instead of failing the read", async () => {
       fake.seed({
