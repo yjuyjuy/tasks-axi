@@ -77,15 +77,15 @@ Any argv shape other than exactly one version flag falls through to `runAxiCli`,
 
 ## Build / test / ship
 
-- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (CI fails if `skills/tasks-axi/SKILL.md` drifts from `src/skill.ts`).
-- The shipped skill stays **minimal** and **defers to the CLI** for all actual guidance. Frontmatter (name/description/metadata) is the discovery surface; the body only says what tasks-axi is, when to reach for it, and pointers to `npx -y tasks-axi` (dashboard), `npx -y tasks-axi --help`, and `npx -y tasks-axi <command> --help`. tasks-axi CLI output is the single source of truth. Never re-duplicate CLI-owned commands, flags, or workflow steps into the skill - prefer a pointer. Never hand-edit `skills/tasks-axi/SKILL.md`; regenerate with `pnpm run build:skill`.
+- `pnpm build` (tsc), `pnpm test` (vitest, `test/` mirrors `src/`), `pnpm lint` (eslint), `pnpm run build:skill -- --check` (CI fails if `.agents/skills/tasks-axi/SKILL.md` drifts from `src/skill.ts`).
+- The shipped skill lives at `.agents/skills/tasks-axi/SKILL.md` (the fleet's per-tool skill home) and follows the fleet's five-section template: trigger description, when to reach for it, 3-6 curated workflows, fleet conventions `--help` cannot know, and non-goals. Help-derivable content is banned: no flag lists, no usage lines, nothing restating `--help`. Length is inversely proportional to AXI compliance, and tasks-axi scores high, so the skill stays a stub and a `test/skill.test.ts` assertion caps its body length. Never hand-edit the generated file; edit `src/skill.ts` and regenerate with `pnpm run build:skill`.
 - This repo is no-mistakes-gated; ship through `/no-mistakes`.
 
 ### Release & packaging (mirrors the `*-axi` siblings)
 
 - **Published to npm as a public package** via `release-please` → `npm publish --access public --provenance` on a release commit (`.github/workflows/release-please.yml`); the captain can also `npm publish` manually. Conventional commits drive the version bump; `release-please-config.json` + `.release-please-manifest.json` own versioning and `CHANGELOG.md`.
 - Every `pull_request` workflow (`ci.yml`, `guard-generated-files.yml`, `no-mistakes-required.yml`) uses `paths-ignore` for the release-please output set (`.release-please-manifest.json`, `CHANGELOG.md`, `package.json`) so release PRs create zero runs. Job-level bot `if`s stay as defense in depth. `test/release-ci-exclusions.test.ts` derives that set from `release-please-config.json` and fails if a workflow drifts; update the ignore lists when adding `extra-files` or changing `release-type`.
-- **The tarball ships runtime JS only.** `package.json` `files` is `dist/**/*.js` (+ `skills/tasks-axi`, `LICENSE`, `README.md`), so the `.d.ts`/`.js.map` that `tsc` emits for local debugging are kept out of the package.
+- **The tarball ships runtime JS only.** `package.json` `files` is `dist/**/*.js` (+ `.agents/skills/tasks-axi`, `LICENSE`, `README.md`), so the `.d.ts`/`.js.map` that `tsc` emits for local debugging are kept out of the package.
   `prepack` runs `npm run build`, so `npm pack`/`npm publish` always rebuild `dist` first.
   In a fresh clone, run `pnpm install --frozen-lockfile` before manual pack or publish.
   Verify with `npm pack --dry-run` (no source/test cruft; bin is `dist/bin/tasks-axi.js` with its shebang preserved by tsc).

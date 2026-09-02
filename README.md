@@ -268,7 +268,7 @@ pnpm lint          # eslint
 pnpm run build:skill -- --check   # fail if the generated skill is stale
 ```
 
-The generated installable skill is intentionally minimal and points agents to the live CLI for all commands, flags, and workflows. CLI output remains the single source of truth.
+The generated installable skill lives at `.agents/skills/tasks-axi/SKILL.md` and is deliberately short: a trigger description, when to reach for the tool, a few curated workflows, conventions the CLI cannot know, and non-goals. It never restates `--help`; CLI output remains the single source of truth.
 
 ## Contributing
 

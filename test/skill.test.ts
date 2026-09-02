@@ -1,6 +1,5 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DESCRIPTION } from "../src/cli.js";
 import { createSkillMarkdown, SKILL_DESCRIPTION } from "../src/skill.js";
 
 function normalizeLineEndings(value: string): string {
@@ -8,28 +7,33 @@ function normalizeLineEndings(value: string): string {
 }
 
 describe("skill generation", () => {
-  it("keeps frontmatter identity and defers instructions to the CLI", () => {
+  it("keeps frontmatter identity and the five-section template", () => {
     const md = createSkillMarkdown();
     expect(md.startsWith("---\nname: tasks-axi\n")).toBe(true);
     expect(md).toContain(JSON.stringify(SKILL_DESCRIPTION));
     expect(md).toContain("metadata:");
-    expect(md).toContain(DESCRIPTION);
-    expect(md).toContain("`npx -y tasks-axi`");
-    expect(md).toContain("`npx -y tasks-axi --help`");
-    expect(md).toContain("`npx -y tasks-axi <command> --help`");
+    for (const heading of [
+      "## When to reach for it",
+      "## Workflows",
+      "## Fleet conventions",
+      "## Non-goals",
+    ]) {
+      expect(md).toContain(heading);
+    }
   });
 
-  it("does not bake CLI-owned command, flag, or workflow text", () => {
-    const md = createSkillMarkdown();
-    expect(md).not.toContain("## Commands");
-    expect(md).not.toContain("## Tips");
-    expect(md).not.toContain("## Workflow");
-    expect(md).not.toMatch(/^commands\[\d+\]:/m);
+  it("stays a stub: body is short and carries no flag reference", () => {
+    const body = createSkillMarkdown().split("\n---\n")[1] ?? "";
+    const lines = body.split("\n").filter((line) => line.trim() !== "");
+    expect(lines.length).toBeLessThanOrEqual(30);
+    expect(body).not.toContain("usage:");
+    expect(body).not.toMatch(/^flags:/m);
+    expect(body).not.toMatch(/^commands\[\d+\]:/m);
   });
 
   it("matches the committed skill file (guards against drift)", () => {
     const committed = readFileSync(
-      new URL("../skills/tasks-axi/SKILL.md", import.meta.url),
+      new URL("../.agents/skills/tasks-axi/SKILL.md", import.meta.url),
       "utf8",
     );
     expect(normalizeLineEndings(committed)).toBe(createSkillMarkdown());
