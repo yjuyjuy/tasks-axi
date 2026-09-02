@@ -250,13 +250,39 @@ Body replacements with `--archive-body` append superseded bodies to `note-archiv
 
 ## Backends
 
-P1 ships the **markdown** backend only, behind a narrow `Store` interface so additional backends slot in without touching the CLI layer.
+Backends sit behind a narrow `Store` interface, so the CLI layer is identical whichever one is active.
 
-| Backend                | Status  |
-| ---------------------- | ------- |
-| markdown               | shipped |
-| sqlite                 | planned |
-| github / jira / linear | planned |
+| Backend        | Status  |
+| -------------- | ------- |
+| markdown       | shipped |
+| linear         | shipped |
+| sqlite         | planned |
+| github / jira  | planned |
+
+### The linear backend
+
+Keeps the backlog in a Linear project instead of a file. Select it with `backend = "linear"` and a `[linear]` table:
+
+```toml
+backend = "linear"
+
+[linear]
+team = "DEV"                 # team key
+project = "my-home"          # the project that holds this backlog
+cache_ttl = 60               # seconds a cached snapshot is reused
+```
+
+`LINEAR_API_KEY` is read from the environment, never from config. `TASKS_AXI_LINEAR_TEAM` and `TASKS_AXI_LINEAR_PROJECT` override the table.
+
+Three behaviours are worth knowing:
+
+- **Workflow states are matched by type, not name.** Renaming `In Progress` to anything, or adding `PR Ready`, changes nothing. A `canceled` issue reads as done.
+- **A whole command costs one request.** The backlog is fetched in one batched query and cached on disk, so a `show` loop over many ids stays cheap; within the TTL a command makes no request at all.
+- **Reads degrade, writes do not.** Every sync rewrites a read-only markdown mirror at the configured backlog path, so reads keep working when Linear is unreachable. A mutation fails with a clear error rather than diverging from the tracker.
+
+Fields Linear has no column for (`kind`, holds, `resume`, report links, dependency reasons) live in an `fm-meta` block at the top of the issue description. Editing it by hand is safe: unparseable metadata is ignored rather than failing the read.
+
+The backend loads its GraphQL client from `linear-axi/client` at runtime, so installing that package is only required when the linear backend is actually used.
 
 ## Development
 
