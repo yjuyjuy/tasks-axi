@@ -527,4 +527,48 @@ describe("linear backend", () => {
       expect(fake.syncCount).toBe(1);
     });
   });
+
+  describe("read-after-write", () => {
+    it("reads a write back even while the disk cache is still fresh", async () => {
+      // Caught live: with a 60s TTL, `add` created the issue and then read the
+      // still-fresh cache back, which did not contain it, so the command failed
+      // even though the write had succeeded.
+      const store = makeStore(60);
+      const created = await store.create({ id: "fresh-ttl", title: "t" });
+      expect(created.id).toBe("fresh-ttl");
+      expect(await store.get("fresh-ttl")).not.toBeNull();
+    });
+
+    it("reflects a transition immediately under a long TTL", async () => {
+      const store = makeStore(60);
+      await store.create({ id: "ttl-move", title: "t" });
+      await store.transition("ttl-move", "in_flight");
+      expect((await store.get("ttl-move"))?.state).toBe("in_flight");
+    });
+
+    it("lets a second process see the first process's write", async () => {
+      await makeStore(60).create({ id: "cross-proc", title: "t" });
+      // A fresh store shares only the on-disk cache, which the write refreshed.
+      expect(await makeStore(60).get("cross-proc")).not.toBeNull();
+    });
+  });
+
+  describe("kind parity with the markdown backend", () => {
+    it("derives kind from a leading keyword when no tag is present", async () => {
+      fake.seed({ identifier: "DEV-1", title: "SHIP Refactor the login flow" });
+      const { items } = await makeStore().list({});
+      expect(items[0]!.kind).toBe("ship");
+    });
+
+    it("prefers an explicit kind tag over the prose keyword", async () => {
+      fake.seed({
+        identifier: "DEV-1",
+        title: "SHIP Refactor the login flow",
+        description: ["```fm-meta", "slug: k", "kind: scout", "```"].join("\n"),
+      });
+      const { items } = await makeStore().list({});
+      expect(items[0]!.kind).toBe("scout");
+    });
+  });
+
 });

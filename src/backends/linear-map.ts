@@ -1,5 +1,5 @@
 import type { State, Task, TaskLink } from "../model.js";
-import { deriveLinks } from "./markdown-grammar.js";
+import { deriveLinks, leadingKind } from "./markdown-grammar.js";
 import { parseDescription } from "./linear-meta.js";
 
 /**
@@ -146,7 +146,10 @@ export function toTask(issue: LinearIssueNode, slugs: SlugTable): Task {
     },
   };
 
-  const kind = meta.kind;
+  // Kind resolution mirrors the markdown backend exactly: an explicit tag
+  // wins, and otherwise a leading `SHIP`/`SCOUT`/`DOCS-ONLY` word in the prose
+  // carries it, so the same title yields the same kind in either backend.
+  const kind = meta.kind ?? leadingKind(issue.title);
   if (kind) task.kind = kind;
   const repo = repoFromLabels(labels);
   if (repo) task.repo = repo;

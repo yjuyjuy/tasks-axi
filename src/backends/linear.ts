@@ -134,6 +134,12 @@ export class LinearStore implements Store {
   private tables: ResolveTables | undefined;
   /** The snapshot this process is working from; one fetch per process, at most. */
   private snapshot: Snapshot | undefined;
+  /**
+   * Set by every mutation: the next read must go to Linear even though the
+   * on-disk cache is still inside its TTL, because we just changed the data
+   * that cache describes and would otherwise read our own write back as absent.
+   */
+  private mustRefetch = false;
 
   constructor(options: LinearStoreOptions) {
     this.team = options.team;
@@ -222,6 +228,7 @@ export class LinearStore implements Store {
 
     const cached = readSnapshot(this.cachePath);
     if (
+      !this.mustRefetch &&
       cached &&
       isFresh(cached, this.cacheTtl, this.nowMs(), this.team, this.project)
     ) {
@@ -249,6 +256,7 @@ export class LinearStore implements Store {
 
   private async fetchSnapshot(): Promise<Snapshot> {
     const issues = await this.fetchIssues();
+    this.mustRefetch = false;
     const snapshot: Snapshot = {
       version: CACHE_VERSION,
       fetchedAt: this.nowMs(),
@@ -308,6 +316,7 @@ export class LinearStore implements Store {
   /** Drop the cached snapshot so the next read reflects a write we just made. */
   private invalidate(): void {
     this.snapshot = undefined;
+    this.mustRefetch = true;
   }
 
   /**
