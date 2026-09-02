@@ -1,5 +1,5 @@
-// Generates skills/tasks-axi/SKILL.md as a minimal stub that defers to the
-// live CLI for all actual guidance (see src/skill.ts).
+// Generates .agents/skills/tasks-axi/SKILL.md, the five-section stub that
+// defers to the live CLI for commands and flags (see src/skill.ts).
 //
 //   pnpm run build:skill            # write the file
 //   pnpm run build:skill -- --check # fail (exit 1) if the committed file is stale
@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { createSkillMarkdown } from "../src/skill.js";
 
-const target = new URL("../skills/tasks-axi/SKILL.md", import.meta.url);
+const target = new URL("../.agents/skills/tasks-axi/SKILL.md", import.meta.url);
 const expected = createSkillMarkdown();
 const check = process.argv.includes("--check");
 
@@ -25,13 +25,13 @@ if (check) {
   }
   if (actual === null || normalizeLineEndings(actual) !== expected) {
     console.error(
-      "skills/tasks-axi/SKILL.md is out of date. Run `pnpm run build:skill` and commit the result.",
+      ".agents/skills/tasks-axi/SKILL.md is out of date. Run `pnpm run build:skill` and commit the result.",
     );
     process.exit(1);
   }
-  console.log("skills/tasks-axi/SKILL.md is up to date.");
+  console.log(".agents/skills/tasks-axi/SKILL.md is up to date.");
 } else {
-  await mkdir(new URL("../skills/tasks-axi/", import.meta.url), {
+  await mkdir(new URL("../.agents/skills/tasks-axi/", import.meta.url), {
     recursive: true,
   });
   await writeFile(target, expected);

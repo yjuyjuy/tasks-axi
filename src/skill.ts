@@ -1,5 +1,3 @@
-import { DESCRIPTION } from "./cli.js";
-
 // Trigger string agents match against to auto-load the skill. Terse and
 // outcome-focused so it fires on "manage the backlog / track tasks" intents.
 export const SKILL_DESCRIPTION =
@@ -21,13 +19,14 @@ function yamlDoubleQuote(value: string): string {
 }
 
 /**
- * Render the installable SKILL.md as a minimal stub.
+ * Render the installable SKILL.md.
  *
- * Frontmatter is the skill's identity and discovery surface. The body only
- * says what tasks-axi is, when to reach for it, and where to get live
- * instructions: the CLI itself. Never bake CLI-owned commands, flags, or
- * workflow steps here - an installed skill goes stale when the npm package
- * is bumped, and `pnpm run build:skill` would re-inflate any such copy.
+ * Shape follows the fleet's five-section CLI skill template: trigger
+ * description, when to reach for it, curated workflows, fleet conventions
+ * `--help` cannot know, and non-goals. Help-derivable content is banned - no
+ * flag lists, no usage lines, nothing that restates `--help`. tasks-axi is a
+ * high-compliance AXI tool, so this stays a stub: the CLI documents itself and
+ * an installed skill goes stale when the npm package is bumped.
  */
 export function createSkillMarkdown(): string {
   return `---
@@ -43,18 +42,38 @@ metadata:
 
 # tasks-axi
 
-${DESCRIPTION}
+Agent ergonomic backlog CLI. Prefer it over hand-editing \`backlog.md\` for any task state, dependency, or hold change.
 
-## When to use
+Run it bare and read the dashboard; every response ends with \`help:\` hints, and every command takes \`--help\`. That is the source of truth for commands and flags.
+If the binary is not on \`PATH\`, run every command as \`npx -y tasks-axi ...\` instead.
 
-Use tasks-axi whenever a task touches the backlog: filing or dispatching work, moving a task through queued -> in flight -> done, recording a PR url or report path on completion, tracking blocked-by dependencies, pausing dispatch with structured holds, finding dispatchable ready work or intentionally held work, or trimming the Done list.
+## When to reach for it
 
-Get every command, flag, and workflow from the live CLI - it is the single source of truth:
+- Local agent work queues: this tool. Linear tickets: \`linear-axi\`. GitHub issues and PRs: \`gh-axi\`.
+- Reads are cheap and unlocked; a bare \`tasks-axi list\` is the dispatch view (ready work only), so re-checking the queue costs almost nothing.
 
-- \`npx -y tasks-axi\` - dashboard of the current backlog
-- \`npx -y tasks-axi --help\` - global usage
-- \`npx -y tasks-axi <command> --help\` - per-command usage
+## Workflows
 
-You do not need tasks-axi installed globally. If the CLI prints a follow-up starting with \`tasks-axi\`, run it as \`npx -y tasks-axi ...\` instead.
+\`\`\`bash
+tasks-axi ready                                   # what is dispatchable right now
+tasks-axi show <id> --full                        # whole body before editing or dispatching
+tasks-axi add <id> "<title>" --blocked-by <other> # file work behind its blocker
+tasks-axi start <id> && tasks-axi done <id> --pr <url>   # dispatch, then close with evidence
+tasks-axi hold <id> --reason "<text>" --kind captain     # park it out of the ready queue
+tasks-axi list --state held --fields hold_kind,hold_reason  # review what is parked and why
+\`\`\`
+
+## Fleet conventions
+
+- **Ids are the Linear key, lowercased** (\`dev-52\`), with a letter suffix per split (\`dev-52a\`). Non-ticket work gets a descriptive slug (\`fm-pr-target-guard\`). Reach for \`--mint\` only when no ticket and no obvious slug exists.
+- **One backlog per firstmate home; there is no global backlog.** Commands act on the backlog of the current directory's workspace, so operating on another home means passing \`--file <home>/data/backlog.md\` on every call. Flags must follow the command, not precede it.
+- **Hold kinds mean:** \`captain\` awaits a human decision, \`external\` awaits something outside the fleet, \`load\` waits for capacity, \`parked\` is deliberately shelved, \`future\` is not yet due (pair with \`--until\`).
+- **Never close a \`captain\` hold with a bare \`done\`.** Firstmate's \`bin/fm-decision-hold.sh close <id>\` is the safe path; a bare \`done\` can bury an unresolved decision in the retention archive where it is no longer addressable.
+
+## Non-goals
+
+- Not a \`--help\` replacement: flags, output schemas, and error codes come from the CLI itself.
+- Not a general note store, and not a cross-home tracker; use \`mv\` for a deliberate cross-file move.
+- Not a markdown editor: the backlog file stays hand-readable, but let the CLI do the writing so the round-trip stays byte-exact.
 `;
 }
