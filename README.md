@@ -205,6 +205,7 @@ To move a dependency-connected set, include every linked blocker and active depe
 The command refuses a move that would strand a dependency across the two files, while preserving intra-set `blocked-by` links and their reason strings.
 Moved tasks are re-rendered canonically, so their multi-paragraph bodies remain intact but a trailing blank separator before the next item or section is dropped.
 `--to` also accepts another task home's directory, which moves the set between homes (on the `linear` backend, between projects) in one transaction.
+That directory's own `.tasks.toml` decides the destination: its `[markdown] path` when it sets one, otherwise `data/backlog.md` when present and then `backlog.md`.
 Both homes must use the same backend: a `markdown`-to-`linear` move is refused with a structured `UNSUPPORTED` error rather than being half-performed.
 
 The read-modify-write window is guarded by an advisory lockfile, an atomic write (temp file + rename), and a fresh re-read on every invocation, so a hand-edit and a CLI-edit cannot clobber each other.

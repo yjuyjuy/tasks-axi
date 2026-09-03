@@ -436,9 +436,10 @@ export class LinearStore implements Store {
    * Linear's `labelIds` is a replacement, not a merge, so this reconciles
    * rather than overwrites: every label tasks-axi does not manage is carried
    * through untouched (a human's `Feature` or `AFK` label must survive a
-   * `hold`), and the three managed families - `fm`, `repo/<name>`, and
-   * `hold[/<kind>]` - are rewritten from the task. Dropping a managed label is
-   * how `unhold` removes `hold/captain`.
+   * `hold`), and the three managed families - `fm`, `repo/<name>`, and the
+   * children of the `Hold` group (plus legacy flat `hold`/`hold/<kind>` names)
+   * - are rewritten from the task. Dropping a managed label is how `unhold`
+   * removes the `Hold` group's `Captain` child.
    */
   private async labelIdsFor(
     tables: ResolveTables,
