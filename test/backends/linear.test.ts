@@ -544,6 +544,33 @@ describe("linear backend", () => {
       expect(labelsOf("DEV-7")).toContain("Parked");
     });
 
+    it("preserves a human label whose name collides with a hold child", async () => {
+      // A workspace may carry a top-level `Parked` a human created AND the
+      // `Hold` group's own `Parked` child. Reconciling by name conflates the
+      // two and silently drops the human's label on an unrelated update.
+      fake.labels.push({ id: "l-human-parked", name: "Parked" });
+      fake.seed({
+        identifier: "DEV-11",
+        description: meta("collide"),
+        labels: {
+          nodes: [
+            { id: "l-human-parked", name: "Parked" },
+            { id: "l-fm", name: "fm" },
+          ],
+        },
+      });
+      const store = makeStore(0);
+      await store.update("collide", { repo: "tasks-axi" });
+
+      const issue = fake.issues.find((node) => node.identifier === "DEV-11");
+      const ids = (issue?.labels.nodes ?? []).map((node) => node.id);
+      expect(ids).toContain("l-human-parked");
+      expect(ids).not.toContain("l-Parked");
+      expect(labelsOf("DEV-11")).toEqual(
+        expect.arrayContaining(["Parked", "fm", "repo/tasks-axi"]),
+      );
+    });
+
     it("preserves labels tasks-axi does not manage", async () => {
       // A human's own label must survive a hold: `labelIds` is a replacement,
       // not a merge, so this is the regression that guards it.

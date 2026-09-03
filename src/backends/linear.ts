@@ -443,22 +443,44 @@ export class LinearStore implements Store {
   private async labelIdsFor(
     tables: ResolveTables,
     task: { repo?: string; hold?: Task["hold"] },
-    existing: string[] = [],
+    existing: { id?: string; name: string }[] = [],
   ): Promise<string[]> {
-    const parentOf = (name: string): string | undefined =>
+    // Reconciliation is by label IDENTITY, not by name: a workspace may hold a
+    // top-level human `Parked` and a `Hold`-group child `Parked`, and matching
+    // on the name alone would drop the human's label.
+    const record = (label: { id?: string; name: string }) =>
+      (label.id !== undefined
+        ? tables.labels.find((candidate) => candidate.id === label.id)
+        : undefined) ??
       tables.labels.find(
-        (label) => label.name.toLowerCase() === name.toLowerCase(),
-      )?.parent?.name;
-    const managed = (name: string): boolean =>
-      name.toLowerCase() === FM_LABEL ||
-      name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
-      isHoldLabel(name, parentOf(name));
+        (candidate) => candidate.name.toLowerCase() === label.name.toLowerCase(),
+      );
+    const managed = (label: { id?: string; name: string }): boolean => {
+      const resolved = record(label);
+      const name = resolved?.name ?? label.name;
+      return (
+        name.toLowerCase() === FM_LABEL ||
+        name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
+        isHoldLabel(name, resolved?.parent?.name)
+      );
+    };
     const hold = holdLabel(task.hold);
-    const ids = await this.ensureLabelIds(tables, [
-      ...existing.filter((name) => !managed(name)),
-      FM_LABEL,
-      ...(task.repo ? [repoLabel(task.repo)] : []),
-    ]);
+    const kept: string[] = [];
+    const unresolved: string[] = [];
+    for (const label of existing) {
+      if (managed(label)) continue;
+      const resolved = record(label);
+      if (resolved) kept.push(resolved.id);
+      else unresolved.push(label.name);
+    }
+    const ids = [
+      ...kept,
+      ...(await this.ensureLabelIds(tables, [
+        ...unresolved,
+        FM_LABEL,
+        ...(task.repo ? [repoLabel(task.repo)] : []),
+      ])),
+    ];
     if (hold) ids.push(await this.holdLabelId(tables, hold));
     return [...new Set(ids)];
   }
@@ -584,14 +606,16 @@ export class LinearStore implements Store {
   }
 
   /**
-   * The labels an issue currently carries, by name. A mutation runs after
+   * The labels an issue currently carries, with ids. A mutation runs after
    * `requireOnline`, so this reads the snapshot that call just fetched and
    * costs no extra request.
    */
-  private async currentLabelNames(key: string): Promise<string[]> {
+  private async currentLabels(
+    key: string,
+  ): Promise<{ id?: string; name: string }[]> {
     const snapshot = await this.load();
     const issue = snapshot?.issues.find((node) => node.identifier === key);
-    return issue?.labels.nodes.map((node) => node.name) ?? [];
+    return issue?.labels.nodes.map((node) => ({ id: node.id, name: node.name })) ?? [];
   }
 
   // -------------------------------------------------------------------------
@@ -829,7 +853,7 @@ export class LinearStore implements Store {
       input.labelIds = await this.labelIdsFor(
         tables,
         next,
-        await this.currentLabelNames(key),
+        await this.currentLabels(key),
       );
     }
     await this.request(ISSUE_UPDATE_MUTATION, { id: key, input }, "update");
@@ -1197,7 +1221,9 @@ export class LinearStore implements Store {
           // A cross-team move is legitimate (two homes may live in different
           // Linear teams); Linear re-keys the identifier, which costs nothing
           // because the tasks-axi slug is the join key.
-          ...(target.team === this.team ? {} : { teamId: tables.teamId }),
+          ...(target.team.toLowerCase() === this.team.toLowerCase()
+              ? {}
+              : { teamId: tables.teamId }),
         },
       },
       "mv",
@@ -1209,8 +1235,8 @@ export class LinearStore implements Store {
     // mirror: a move is the one mutation with nothing to read back, and the
     // next command in either home would otherwise pay for the refetch and
     // find no mirror to fall back on offline.
-    await this.fetchSnapshot();
-    await target.fetchSnapshot();
+    this.snapshot = await this.fetchSnapshot();
+    target.snapshot = await target.fetchSnapshot();
     return moving;
   }
 

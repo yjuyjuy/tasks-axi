@@ -677,9 +677,7 @@ function resolveDestinationHome(
     // A markdown home keeps its historical `--to <dir>` preference: a firstmate
     // home's backlog is `data/backlog.md`, and only an explicitly configured
     // path overrides that.
-    const path = configuredMarkdownPath(base, config.path)
-      ? config.path
-      : legacyBacklogPath(base);
+    const path = config.pathExplicit ? config.path : legacyBacklogPath(base);
     const resolved: ResolvedConfig = { ...config, path };
     return {
       store: makeStore(resolved),
@@ -699,19 +697,26 @@ function resolveDestinationHome(
   };
 }
 
+/**
+ * True when `--to` names the home this process already runs against. A linear
+ * partition is resolved server-side with `eqIgnoreCase`, so its label compares
+ * case-insensitively; a markdown path stays an exact filesystem comparison.
+ */
+function sameHome(
+  destination: ResolvedConfig,
+  fromLabel: string,
+  toLabel: string,
+): boolean {
+  return destination.backend === "linear"
+    ? toLabel.toLowerCase() === fromLabel.toLowerCase()
+    : toLabel === fromLabel;
+}
+
 /** How a home is named in confirmations: its backlog path, or its partition. */
 function homeLabel(config: ResolvedConfig): string {
   return config.backend === "linear" && config.linear
     ? `${config.linear.team}/${config.linear.project}`
     : config.path;
-}
-
-/** True when the destination's own config named a backlog path explicitly. */
-function configuredMarkdownPath(dir: string, path: string): boolean {
-  return (
-    resolve(path) !== resolve(dir, "backlog.md") &&
-    resolve(path) !== resolve(dir, "data", "backlog.md")
-  );
 }
 
 function legacyBacklogPath(dir: string): string {
@@ -755,7 +760,7 @@ export async function mvCommand(
     // shapes, so the two homes must share a backend.
     throw crossBackendMove(config.backend, destination.config.backend);
   }
-  if (destination.label === fromLabel) {
+  if (sameHome(destination.config, fromLabel, destination.label)) {
     throw new AxiError(
       "--to resolves to the current backlog",
       "VALIDATION_ERROR",

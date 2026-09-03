@@ -891,6 +891,31 @@ describe("state commands", () => {
       }
     });
 
+    it("honours an explicit [markdown] path over the data/backlog.md default", async () => {
+      const b = makeBacklog();
+      const target = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      try {
+        const fs = await import("node:fs");
+        fs.mkdirSync(join(target.dir, "data"), { recursive: true });
+        fs.writeFileSync(
+          join(target.dir, "data", "backlog.md"),
+          "# Backlog\n\n## Queued\n\n## Done\n",
+        );
+        fs.writeFileSync(
+          join(target.dir, ".tasks.toml"),
+          '[markdown]\npath = "backlog.md"\n',
+        );
+        await mvCommand(["cert-cleanup", "--to", target.dir], b.ctx);
+        expect(readFileSync(target.path, "utf8")).toContain("cert-cleanup");
+        expect(
+          readFileSync(join(target.dir, "data", "backlog.md"), "utf8"),
+        ).not.toContain("cert-cleanup");
+      } finally {
+        b.cleanup();
+        target.cleanup();
+      }
+    });
+
     it("moves the task from a fresh locked source read", async () => {
       const b = makeBacklog(
         "# Backlog\n\n## Queued\n- [ ] race-q1 - stale title\n\n## Done\n",

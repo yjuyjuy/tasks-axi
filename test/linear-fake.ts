@@ -25,8 +25,14 @@ export const meta = (slug: string): string => ["```fm-meta", `slug: ${slug}`, "`
  * Label ids round-trip back to names the way Linear does. The backend mints an
  * id of `l-<name>` for a label it creates, so the name is recoverable.
  */
-const labelNodes = (ids: string[] | undefined): { name: string }[] =>
-  (ids ?? []).map((id) => ({ name: id.replace(/^l-/, "") }));
+const labelNodes = (
+  ids: string[] | undefined,
+  known: { id: string; name: string }[],
+): { id: string; name: string }[] =>
+  (ids ?? []).map((id) => ({
+    id,
+    name: known.find((label) => label.id === id)?.name ?? id.replace(/^l-/, ""),
+  }));
 
 /**
  * The team's pre-existing labels, including the `Hold` **group** the real DEV
@@ -219,7 +225,7 @@ export class FakeLinear implements LinearClientLike {
         description: input.description as string,
         state: stateNode,
         priority: Number(input.priority ?? 0),
-        labels: { nodes: labelNodes(input.labelIds as string[] | undefined) },
+        labels: { nodes: labelNodes(input.labelIds as string[] | undefined, this.labels) },
         project: { name: this.projectForId(input.projectId as string) },
       });
       return { issueCreate: { success: true, issue: node } } as T;
@@ -255,7 +261,7 @@ export class FakeLinear implements LinearClientLike {
       if (input.labelIds !== undefined) {
         this.assertAssignable(input.labelIds as unknown as string[]);
         issue.labels = {
-          nodes: labelNodes(input.labelIds as unknown as string[]),
+          nodes: labelNodes(input.labelIds as unknown as string[], this.labels),
         };
       }
       if (input.stateId !== undefined) {
