@@ -282,6 +282,8 @@ Three behaviours are worth knowing:
 
 Fields Linear has no column for (`kind`, holds, `resume`, report links, dependency reasons) live in an `fm-meta` block at the top of the issue description. Editing it by hand is safe: unparseable metadata is ignored rather than failing the read.
 
+Two markdown-only capabilities are refused with a clear error rather than silently dropped: `update --archive-body` (there is no `note-archive.md` to preserve the superseded body in) and dependency types other than `blocked-by` (Linear models only blocking relations). Priority 0 and 1 both write as Linear's `Low`, since Linear's scale reserves 0 for "no priority"; every other priority round-trips.
+
 The backend loads its GraphQL client from `linear-axi/client` at runtime, so installing that package is only required when the linear backend is actually used.
 
 ## Development

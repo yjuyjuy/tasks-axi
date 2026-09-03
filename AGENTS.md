@@ -62,7 +62,8 @@ Selected with `backend = "linear"` plus a `[linear]` table naming `team` and `pr
 - **Kind derivation matches the markdown backend** (explicit tag, else a leading `SHIP`/`SCOUT` word), so the same title yields the same kind in either backend.
 - **The client is loaded dynamically** via `import("linear-axi/client")` behind a shape guard (`linear-client.ts`). It is deliberately **not** a declared dependency: the npm name `linear-axi` is held by an unrelated package, and a static import would pull a network client into the import-light `bin/tasks-axi.ts`. A missing install fails with an actionable error.
   Tests inject a fake client instead and assert request counts, so CI never touches the network.
-
+- **A capability Linear cannot honour is refused, never silently dropped.** `update --archive-body` and non-`blocked-by` dep types raise `unsupported()` rather than losing the body or posting a relation with no issue id.
+  Priority is folded into Linear's 0-4 scale (which rejects 5 and reserves 0 for "unset"), so tasks-axi 0 and 1 both write as `Low` and every other value round-trips.
 
 ## Conventions
 
