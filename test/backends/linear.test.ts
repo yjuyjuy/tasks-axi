@@ -571,6 +571,29 @@ describe("linear backend", () => {
       );
     });
 
+    it("preserves a workspace label whose id the team tables do not know", async () => {
+      // The `Hold` group is workspace-scoped, so an issue can carry a
+      // workspace-level human `Parked` that is absent from the team's label
+      // table while a `Hold`-group child `Parked` is present in it.
+      fake.seed({
+        identifier: "DEV-12",
+        description: meta("workspace"),
+        labels: {
+          nodes: [
+            { id: "l-workspace-parked", name: "Parked" },
+            { id: "l-fm", name: "fm" },
+          ],
+        },
+      });
+      const store = makeStore(0);
+      await store.update("workspace", { repo: "tasks-axi" });
+
+      const issue = fake.issues.find((node) => node.identifier === "DEV-12");
+      const ids = (issue?.labels.nodes ?? []).map((node) => node.id);
+      expect(ids).toContain("l-workspace-parked");
+      expect(ids).not.toContain("l-Parked");
+    });
+
     it("preserves labels tasks-axi does not manage", async () => {
       // A human's own label must survive a hold: `labelIds` is a replacement,
       // not a merge, so this is the regression that guards it.

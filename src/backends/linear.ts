@@ -445,33 +445,35 @@ export class LinearStore implements Store {
     task: { repo?: string; hold?: Task["hold"] },
     existing: { id?: string; name: string }[] = [],
   ): Promise<string[]> {
-    // Reconciliation is by label IDENTITY, not by name: a workspace may hold a
-    // top-level human `Parked` and a `Hold`-group child `Parked`, and matching
-    // on the name alone would drop the human's label.
+    // Reconciliation is by label IDENTITY, never by name: a workspace may hold
+    // a top-level human `Parked` and a `Hold`-group child `Parked`. A label id
+    // the team tables do not know cannot have its group determined, so it is
+    // preserved untouched rather than guessed at by name.
     const record = (label: { id?: string; name: string }) =>
-      (label.id !== undefined
+      label.id !== undefined
         ? tables.labels.find((candidate) => candidate.id === label.id)
-        : undefined) ??
-      tables.labels.find(
-        (candidate) => candidate.name.toLowerCase() === label.name.toLowerCase(),
-      );
-    const managed = (label: { id?: string; name: string }): boolean => {
-      const resolved = record(label);
-      const name = resolved?.name ?? label.name;
-      return (
-        name.toLowerCase() === FM_LABEL ||
-        name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
-        isHoldLabel(name, resolved?.parent?.name)
-      );
-    };
+        : tables.labels.find(
+            (candidate) =>
+              candidate.name.toLowerCase() === label.name.toLowerCase(),
+          );
+    const managedName = (name: string, parent?: string): boolean =>
+      name.toLowerCase() === FM_LABEL ||
+      name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
+      isHoldLabel(name, parent);
     const hold = holdLabel(task.hold);
     const kept: string[] = [];
     const unresolved: string[] = [];
     for (const label of existing) {
-      if (managed(label)) continue;
       const resolved = record(label);
-      if (resolved) kept.push(resolved.id);
-      else unresolved.push(label.name);
+      if (!resolved) {
+        if (managedName(label.name)) continue;
+        if (label.id !== undefined) kept.push(label.id);
+        else unresolved.push(label.name);
+        continue;
+      }
+      if (!managedName(resolved.name, resolved.parent?.name)) {
+        kept.push(resolved.id);
+      }
     }
     const ids = [
       ...kept,

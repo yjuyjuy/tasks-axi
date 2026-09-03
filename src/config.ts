@@ -23,7 +23,7 @@ export interface ResolvedConfig {
   /** Optional archive path for pruned tasks (resolved to an absolute path). */
   archivePath?: string;
   doneKeep: number;
-  /** True when a config/env/flag named the markdown path, rather than defaulting. */
+  /** True when this home's own `.tasks.toml` named `[markdown] path`. */
   pathExplicit?: boolean;
   /** Present when `backend = "linear"`; the Linear partition to operate on. */
   linear?: ResolvedLinearConfig;
@@ -297,7 +297,7 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
     backend,
     path,
     doneKeep,
-    pathExplicit: explicitPath !== undefined || tomlPath !== undefined,
+    pathExplicit: projectToml.markdown?.path !== undefined,
   };
   if (archive) {
     config.archivePath = isAbsolute(archive) ? archive : resolve(cwd, archive);

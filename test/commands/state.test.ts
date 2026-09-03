@@ -1,4 +1,11 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -911,6 +918,38 @@ describe("state commands", () => {
           readFileSync(join(target.dir, "data", "backlog.md"), "utf8"),
         ).not.toContain("cert-cleanup");
       } finally {
+        b.cleanup();
+        target.cleanup();
+      }
+    });
+
+    it("keeps the data/backlog.md preference when only a global path is set", async () => {
+      const b = makeBacklog();
+      const target = makeBacklog("# Backlog\n\n## Queued\n\n## Done\n");
+      const fakeHome = mkdtempSync(join(tmpdir(), "tasks-axi-home-"));
+      const previousHome = process.env.HOME;
+      try {
+        const fs = await import("node:fs");
+        fs.mkdirSync(join(fakeHome, ".tasks-axi"), { recursive: true });
+        fs.writeFileSync(
+          join(fakeHome, ".tasks-axi", "config.toml"),
+          '[markdown]\npath = "backlog.md"\n',
+        );
+        fs.mkdirSync(join(target.dir, "data"), { recursive: true });
+        fs.writeFileSync(
+          join(target.dir, "data", "backlog.md"),
+          "# Backlog\n\n## Queued\n\n## Done\n",
+        );
+        process.env.HOME = fakeHome;
+        await mvCommand(["cert-cleanup", "--to", target.dir], b.ctx);
+        expect(
+          readFileSync(join(target.dir, "data", "backlog.md"), "utf8"),
+        ).toContain("cert-cleanup");
+        expect(readFileSync(target.path, "utf8")).not.toContain("cert-cleanup");
+      } finally {
+        if (previousHome === undefined) delete process.env.HOME;
+        else process.env.HOME = previousHome;
+        rmSync(fakeHome, { recursive: true, force: true });
         b.cleanup();
         target.cleanup();
       }
