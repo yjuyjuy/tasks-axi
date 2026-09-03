@@ -23,6 +23,20 @@ export interface ResolvedConfig {
   /** Optional archive path for pruned tasks (resolved to an absolute path). */
   archivePath?: string;
   doneKeep: number;
+  /** Present when `backend = "linear"`; the Linear partition to operate on. */
+  linear?: ResolvedLinearConfig;
+}
+
+/** The resolved `[linear]` table (report §8 config selection, ticket DEV-44). */
+export interface ResolvedLinearConfig {
+  /** Linear team key, e.g. `DEV`. */
+  team: string;
+  /** Linear project name that partitions this home's backlog. */
+  project: string;
+  /** Seconds a cached snapshot is served without any network request. */
+  cacheTtl: number;
+  /** Where the read-only markdown mirror is written (absolute path). */
+  mirrorPath: string;
 }
 
 export interface ConfigOverrides {
@@ -40,15 +54,23 @@ interface TomlConfig {
     archive?: string;
     done_keep?: number;
   };
+  linear?: {
+    team?: string;
+    project?: string;
+    cache_ttl?: number;
+  };
 }
 
 const DEFAULT_KEEP = 10;
+/** Short enough that a stale read self-heals, long enough to cover a read loop. */
+const DEFAULT_CACHE_TTL = 60;
 const PATH_CANDIDATES = ["backlog.md", "data/backlog.md"];
-type ConfigTable = "root" | "markdown" | "unsupported";
+type ConfigTable = "root" | "markdown" | "linear" | "unsupported";
 
 /**
  * Minimal TOML reader for the tiny config surface we need: a top-level
- * `backend` key and a `[markdown]` table with `path` / `archive` / `done_keep`.
+ * `backend` key, a `[markdown]` table with `path` / `archive` / `done_keep`,
+ * and a `[linear]` table with `team` / `project` / `cache_ttl`.
  * `archive` points at the file that receives pruned tasks.
  * Intentionally not a general TOML parser.
  */
@@ -62,7 +84,11 @@ export function parseConfigToml(src: string): TomlConfig {
 
     const section = line.match(/^\[([^\]]+)\]$/);
     if (section) {
-      table = section[1].trim() === "markdown" ? "markdown" : "unsupported";
+      const name = section[1].trim();
+      table =
+        name === "markdown" || name === "linear"
+          ? (name as ConfigTable)
+          : "unsupported";
       continue;
     }
 
@@ -83,6 +109,24 @@ export function parseConfigToml(src: string): TomlConfig {
 
     if (table === "root") {
       config.backend = requireTomlString(value, source);
+      continue;
+    }
+    if (table === "linear") {
+      config.linear ??= {};
+      if (key === "team") config.linear.team = requireTomlString(value, source);
+      if (key === "project") {
+        config.linear.project = requireTomlString(value, source);
+      }
+      if (key === "cache_ttl") {
+        if (typeof value !== "number") {
+          throw new AxiError(
+            "linear.cache_ttl must be an integer number of seconds",
+            "VALIDATION_ERROR",
+            ["Set `[linear] cache_ttl = 60` in .tasks.toml"],
+          );
+        }
+        config.linear.cache_ttl = value;
+      }
       continue;
     }
     config.markdown ??= {};
@@ -131,6 +175,12 @@ function configKeySource(
     (key === "path" || key === "archive" || key === "done_keep")
   ) {
     return `markdown.${key}`;
+  }
+  if (
+    table === "linear" &&
+    (key === "team" || key === "project" || key === "cache_ttl")
+  ) {
+    return `linear.${key}`;
   }
   return undefined;
 }
@@ -244,5 +294,48 @@ export function resolveConfig(overrides: ConfigOverrides = {}): ResolvedConfig {
   if (archive) {
     config.archivePath = isAbsolute(archive) ? archive : resolve(cwd, archive);
   }
+  if (backend === "linear") {
+    config.linear = resolveLinearConfig(
+      { ...homeToml.linear, ...projectToml.linear },
+      env,
+      path,
+    );
+  }
   return config;
+}
+
+/**
+ * The `[linear]` table, with env overrides for the two addressing values so a
+ * throwaway partition can be pointed at without editing the checked-in config.
+ *
+ * The mirror lives beside the configured backlog path: that path stays the
+ * markdown file the read-only mirror is rendered into, so an offline `list`
+ * degrades to exactly the file a markdown home would have read.
+ */
+function resolveLinearConfig(
+  table: { team?: string; project?: string; cache_ttl?: number },
+  env: NodeJS.ProcessEnv,
+  mirrorPath: string,
+): ResolvedLinearConfig {
+  const team = (env.TASKS_AXI_LINEAR_TEAM ?? table.team ?? "").trim();
+  const project = (env.TASKS_AXI_LINEAR_PROJECT ?? table.project ?? "").trim();
+  if (!team || !project) {
+    throw new AxiError(
+      'The linear backend requires `[linear] team = "..."` and `project = "..."`',
+      "VALIDATION_ERROR",
+      [
+        'Add `[linear]` with `team = "DEV"` and `project = "<home-name>"` to .tasks.toml',
+        "Run `linear-axi teams` and `linear-axi projects --team <KEY>` to see the valid values",
+      ],
+    );
+  }
+  const cacheTtl = table.cache_ttl ?? DEFAULT_CACHE_TTL;
+  if (!Number.isSafeInteger(cacheTtl) || cacheTtl < 0) {
+    throw new AxiError(
+      "linear.cache_ttl must be a non-negative integer number of seconds",
+      "VALIDATION_ERROR",
+      ["Set `[linear] cache_ttl = 60` in .tasks.toml"],
+    );
+  }
+  return { team, project, cacheTtl, mirrorPath };
 }

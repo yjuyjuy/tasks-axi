@@ -175,3 +175,85 @@ describe("resolveConfig", () => {
     },
   );
 });
+
+describe("the [linear] table", () => {
+  const write = (toml: string): void => {
+    writeFileSync(join(dir, ".tasks.toml"), toml);
+  };
+  const linearToml = [
+    'backend = "linear"',
+    "",
+    "[linear]",
+    'team = "DEV"',
+    'project = "my-home"',
+    "cache_ttl = 120",
+  ].join("\n");
+
+  it("parses team, project, and cache_ttl", () => {
+    const cfg = parseConfigToml(linearToml);
+    expect(cfg.backend).toBe("linear");
+    expect(cfg.linear).toEqual({
+      team: "DEV",
+      project: "my-home",
+      cache_ttl: 120,
+    });
+  });
+
+  it("resolves the linear config with the mirror at the backlog path", () => {
+    write(linearToml);
+    const config = resolveConfig({ cwd: dir, home });
+    expect(config.backend).toBe("linear");
+    expect(config.linear).toMatchObject({
+      team: "DEV",
+      project: "my-home",
+      cacheTtl: 120,
+    });
+    // The mirror deliberately reuses the backlog path, so an offline read
+    // degrades to exactly the file a markdown home would have read.
+    expect(config.linear?.mirrorPath).toBe(config.path);
+  });
+
+  it("defaults cache_ttl when it is omitted", () => {
+    write(['backend = "linear"', "[linear]", 'team = "DEV"', 'project = "p"'].join("\n"));
+    expect(resolveConfig({ cwd: dir, home }).linear?.cacheTtl).toBe(60);
+  });
+
+  it("lets the environment override team and project", () => {
+    write(linearToml);
+    const config = resolveConfig({
+      cwd: dir,
+      home,
+      env: {
+        TASKS_AXI_LINEAR_TEAM: "OPS",
+        TASKS_AXI_LINEAR_PROJECT: "other-home",
+      },
+    });
+    expect(config.linear).toMatchObject({ team: "OPS", project: "other-home" });
+  });
+
+  it("fails with actionable help when team or project is missing", () => {
+    write('backend = "linear"\n[linear]\nteam = "DEV"\n');
+    try {
+      resolveConfig({ cwd: dir, home });
+      throw new Error("expected a validation error");
+    } catch (error) {
+      const err = error as { code?: string; suggestions?: string[] };
+      expect(err.code).toBe("VALIDATION_ERROR");
+      // The suggestions must name the command that lists valid values, because
+      // the user cannot guess a project name.
+      expect(err.suggestions?.join(" ")).toMatch(/linear-axi projects/);
+    }
+  });
+
+  it("rejects a negative cache_ttl", () => {
+    write(
+      ['backend = "linear"', "[linear]", 'team = "T"', 'project = "p"', "cache_ttl = -5"].join("\n"),
+    );
+    expect(() => resolveConfig({ cwd: dir, home })).toThrow(/cache_ttl/);
+  });
+
+  it("does not populate linear config for a markdown home", () => {
+    write('backend = "markdown"\n');
+    expect(resolveConfig({ cwd: dir, home }).linear).toBeUndefined();
+  });
+});
