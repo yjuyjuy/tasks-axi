@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.0](https://github.com/yjuyjuy/tasks-axi/compare/tasks-axi-v0.2.5...tasks-axi-v0.3.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **commands:** tasks-axi update no longer accepts --append. Agents must inspect the current body and replace it with --body or --body-file, optionally passing --archive-body to preserve the superseded body in note-archive.md.
+
+### Features
+
+* add durable public follow-up obligations ([#16](https://github.com/yjuyjuy/tasks-axi/issues/16)) ([d7845d3](https://github.com/yjuyjuy/tasks-axi/commit/d7845d3b3dc1cbf084909e127c1a65f3abac2fce))
+* add markdown-backed tasks-axi CLI ([#1](https://github.com/yjuyjuy/tasks-axi/issues/1)) ([239b320](https://github.com/yjuyjuy/tasks-axi/commit/239b32046222c1e176390e592f28232f2dc69684))
+* add structured task holds ([#8](https://github.com/yjuyjuy/tasks-axi/issues/8)) ([0f283ed](https://github.com/yjuyjuy/tasks-axi/commit/0f283ed3d988a7ecd9cd12d325ac4b5f4f68007b))
+* **backends:** add a Linear backend for tasks-axi ([#9](https://github.com/yjuyjuy/tasks-axi/issues/9)) ([940668d](https://github.com/yjuyjuy/tasks-axi/commit/940668d9f40befe409c44b756e9e6be46a2ab968))
+* **backends:** round-trip firstmate backlog format ([#4](https://github.com/yjuyjuy/tasks-axi/issues/4)) ([891555c](https://github.com/yjuyjuy/tasks-axi/commit/891555ccb7e694e359ab9b2c0f70f5f2af3c065d))
+* **cli:** add confirmation-forward mutation output ([#6](https://github.com/yjuyjuy/tasks-axi/issues/6)) ([6d39143](https://github.com/yjuyjuy/tasks-axi/commit/6d39143e14bfef6711a31371129343b23f97bf0e))
+* **commands:** replace append notes with body replacement archival ([#10](https://github.com/yjuyjuy/tasks-axi/issues/10)) ([a7993d2](https://github.com/yjuyjuy/tasks-axi/commit/a7993d2a8e8b56f1f66d125fd057de1587b62c80))
+* **linear:** typed hold labels and cross-home mv for the Linear backend ([#10](https://github.com/yjuyjuy/tasks-axi/issues/10)) ([bbefc97](https://github.com/yjuyjuy/tasks-axi/commit/bbefc972ef72e17f11b708a7d84ca69020524d76))
+* **list:** ready-only dispatch default with compact mode ([#7](https://github.com/yjuyjuy/tasks-axi/issues/7)) ([95a9654](https://github.com/yjuyjuy/tasks-axi/commit/95a96543f37e3296c1a5a6265e36049cf6b6beea))
+* move linked task sets atomically ([#13](https://github.com/yjuyjuy/tasks-axi/issues/13)) ([f75ebbd](https://github.com/yjuyjuy/tasks-axi/commit/f75ebbd9faf92c1eb4cc8aa958ad5f37607ea677))
+* rank tasks by priority and persist a resumable session token ([e0c61aa](https://github.com/yjuyjuy/tasks-axi/commit/e0c61aa5be7716e6115cf21ed2ae7a1fbfa2fafc))
+* rank tasks by priority and persist a resumable session token ([914d5ca](https://github.com/yjuyjuy/tasks-axi/commit/914d5cad9ac7858cc0bef967a8839b06c9fdaec4))
+
+
+### Bug Fixes
+
+* execute every PR body compliance event ([#22](https://github.com/yjuyjuy/tasks-axi/issues/22)) ([ce32241](https://github.com/yjuyjuy/tasks-axi/commit/ce322417a186a90bfa6ff27e4e2243789166db09))
+* **markdown:** preserve blank lines in task bodies ([#11](https://github.com/yjuyjuy/tasks-axi/issues/11)) ([0229c56](https://github.com/yjuyjuy/tasks-axi/commit/0229c5611b7ab23b8ff54cf08c7ca337b508f840))
+
 ## [0.2.5](https://github.com/kunchenguid/tasks-axi/compare/tasks-axi-v0.2.4...tasks-axi-v0.2.5) (2026-08-07)
 
 
