@@ -29,6 +29,8 @@ export interface Capabilities {
   serverMintsIds: boolean;
   /** Supports the durable, receipt-gated public-followup state machine. */
   publicFollowups: boolean;
+  /** Can a connected set of tasks be moved to another home of this backend? */
+  crossHomeMove: boolean;
 }
 
 export interface PruneOptions {
@@ -81,4 +83,12 @@ export interface Store {
   prune?(options: PruneOptions): Promise<PruneResult>;
   /** Normalize the persisted view (markdown: rewrite every item canonically). */
   render?(): Promise<number>;
+
+  /**
+   * Move a connected set of tasks to another home in one transaction (optional,
+   * capability-gated by `crossHomeMove`). Both stores must be the same backend:
+   * the destination is passed as a `Store` so the CLI stays backend-agnostic,
+   * and each implementation refuses a target it cannot write to.
+   */
+  moveManyTo?(ids: string[], target: Store): Promise<Task[]>;
 }

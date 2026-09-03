@@ -61,7 +61,8 @@ interface TomlConfig {
   };
 }
 
-const DEFAULT_KEEP = 10;
+/** Retained Done tasks when no config says otherwise. */
+export const DEFAULT_KEEP = 10;
 /** Short enough that a stale read self-heals, long enough to cover a read loop. */
 const DEFAULT_CACHE_TTL = 60;
 const PATH_CANDIDATES = ["backlog.md", "data/backlog.md"];

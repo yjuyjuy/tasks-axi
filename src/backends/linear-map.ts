@@ -1,4 +1,4 @@
-import type { State, Task, TaskLink } from "../model.js";
+import type { Hold, State, Task, TaskLink } from "../model.js";
 import { deriveLinks, leadingKind } from "./markdown-grammar.js";
 import { parseDescription } from "./linear-meta.js";
 
@@ -43,9 +43,31 @@ export function stateForType(type: string): State {
 export const REPO_LABEL_PREFIX = "repo/";
 /** Every issue this backend owns carries the fleet label. */
 export const FM_LABEL = "fm";
+/**
+ * The label a held issue carries, so a hold is filterable server-side in
+ * Linear's own UI (`label:hold/captain`) without reading any description.
+ *
+ * A hold kind is optional in the model, so an untyped hold carries the bare
+ * `hold` label and a typed one carries `hold/<kind>`; no kind is ever invented.
+ * The label is derived state: `fm-meta` remains the authoritative record of the
+ * reason and the `until` date, because Linear has no column for either.
+ */
+export const HOLD_LABEL = "hold";
+export const HOLD_LABEL_PREFIX = "hold/";
 
 export function repoLabel(repo: string): string {
   return `${REPO_LABEL_PREFIX}${repo}`;
+}
+
+/** The label name for a hold, or undefined when the task is not held. */
+export function holdLabel(hold: Hold | undefined): string | undefined {
+  if (!hold) return undefined;
+  return hold.kind ? `${HOLD_LABEL_PREFIX}${hold.kind}` : HOLD_LABEL;
+}
+
+export function isHoldLabel(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower === HOLD_LABEL || lower.startsWith(HOLD_LABEL_PREFIX);
 }
 
 function repoFromLabels(labels: string[]): string | undefined {
@@ -76,6 +98,8 @@ export function priorityFromLinear(priority: number): number | undefined {
 
 /** The shape of a Linear issue this backend reads; a subset of the client type. */
 export interface LinearIssueNode {
+  /** Linear's UUID. Batch mutations address issues by UUID, not identifier. */
+  id?: string;
   identifier: string;
   title: string;
   description: string | null;
@@ -84,7 +108,7 @@ export interface LinearIssueNode {
   createdAt: string;
   updatedAt: string;
   state: { name: string; type: string };
-  labels: { nodes: { name: string }[] };
+  labels: { nodes: { id?: string; name: string }[] };
   project?: { name: string } | null;
   /** Edges pointing at this issue: a `blocks` inverse edge means "blocked by". */
   inverseRelations: {
@@ -144,6 +168,7 @@ export function toTask(issue: LinearIssueNode, slugs: SlugTable): Task {
       }),
     meta: {
       linear_id: issue.identifier,
+      ...(issue.id ? { linear_uuid: issue.id } : {}),
       linear_url: issue.url,
       linear_state: issue.state.name,
       linear_state_type: issue.state.type,

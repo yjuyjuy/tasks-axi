@@ -4,213 +4,21 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AxiError } from "../../src/errors.js";
 import { LinearStore } from "../../src/backends/linear.js";
-import type { LinearClientLike } from "../../src/backends/linear-client.js";
-import type { LinearIssueNode } from "../../src/backends/linear-map.js";
+import {
+  FakeLinear,
+  OTHER_PROJECT,
+  PROJECT,
+  TEAM,
+  meta,
+} from "../linear-fake.js";
 
 /**
  * The linear backend is tested against an injected fake client rather than the
  * network: the fake models Linear's response shapes and records every request,
  * which is what lets these tests assert the batching and offline guarantees
- * (DEV-44 acceptance criteria 3 and 4) deterministically in CI.
+ * (DEV-44 acceptance criteria 3 and 4) deterministically in CI. The fake lives
+ * in `test/linear-fake.ts` because the CLI-level tests need it too.
  */
-
-const TEAM = "DEV";
-const PROJECT = "Test Home";
-
-/** An `fm-meta` description carrying just the slug join key. */
-const meta = (slug: string): string => ["```fm-meta", `slug: ${slug}`, "```"].join("\n");
-
-/**
- * Label ids round-trip back to names the way Linear does. The backend mints an
- * id of `l-<name>` for a label it creates, so the name is recoverable.
- */
-const labelNodes = (ids: string[] | undefined): { name: string }[] =>
-  (ids ?? []).map((id) => ({ name: id.replace(/^l-/, "") }));
-
-interface FakeOptions {
-  /** Fail every request with a network error, simulating a blocked network. */
-  offline?: boolean;
-}
-
-class FakeLinear implements LinearClientLike {
-  /** Every request, in order, as `operation` labels. */
-  readonly calls: { operation: string; query: string }[] = [];
-  issues: LinearIssueNode[] = [];
-  offline = false;
-  private seq = 0;
-  private relations: { id: string; blocked: string; blocker: string }[] = [];
-
-  constructor(options: FakeOptions = {}) {
-    this.offline = options.offline ?? false;
-  }
-
-  /** Requests that actually crossed the wire, for batching assertions. */
-  get requestCount(): number {
-    return this.calls.length;
-  }
-
-  get syncCount(): number {
-    return this.calls.filter((call) => call.operation === "sync").length;
-  }
-
-  reset(): void {
-    this.calls.length = 0;
-  }
-
-  seed(issue: Partial<LinearIssueNode> & { identifier: string }): LinearIssueNode {
-    const node: LinearIssueNode = {
-      identifier: issue.identifier,
-      title: issue.title ?? "untitled",
-      description: issue.description ?? null,
-      url: issue.url ?? `https://linear.app/x/issue/${issue.identifier}`,
-      priority: issue.priority ?? 0,
-      createdAt: issue.createdAt ?? "2026-01-01T00:00:00.000Z",
-      updatedAt: issue.updatedAt ?? "2026-01-01T00:00:00.000Z",
-      state: issue.state ?? { name: "Todo", type: "unstarted" },
-      labels: issue.labels ?? { nodes: [] },
-      project: issue.project ?? { name: PROJECT },
-      inverseRelations: issue.inverseRelations ?? { nodes: [] },
-    };
-    this.issues.push(node);
-    return node;
-  }
-
-  private withRelations(): LinearIssueNode[] {
-    return this.issues.map((issue) => ({
-      ...issue,
-      inverseRelations: {
-        nodes: this.relations
-          .filter((relation) => relation.blocked === issue.identifier)
-          .map((relation) => ({
-            type: "blocks",
-            issue: { identifier: relation.blocker },
-          })),
-      },
-    }));
-  }
-
-  async request<T>(
-    query: string,
-    variables: Record<string, unknown>,
-    operation: string,
-  ): Promise<T> {
-    if (this.offline) {
-      throw new AxiError("connect ENETUNREACH", "NETWORK_ERROR");
-    }
-    this.calls.push({ operation, query });
-
-    if (query.includes("issues(")) {
-      return {
-        issues: {
-          nodes: this.withRelations(),
-          pageInfo: { hasNextPage: false, endCursor: null },
-        },
-      } as T;
-    }
-    if (query.includes("team(")) {
-      return {
-        team: {
-          id: "team-1",
-          key: TEAM,
-          states: {
-            nodes: [
-              { id: "s-backlog", name: "Backlog", type: "backlog", position: 0 },
-              { id: "s-todo", name: "Todo", type: "unstarted", position: 1 },
-              // Two started states: the lowest position must win, and the
-              // names here are deliberately non-default to prove names are
-              // never matched on.
-              { id: "s-doing", name: "Cooking", type: "started", position: 1 },
-              { id: "s-pr", name: "PR Ready", type: "started", position: 2 },
-              { id: "s-done", name: "Shipped", type: "completed", position: 3 },
-            ],
-          },
-          labels: { nodes: [{ id: "l-fm", name: "fm" }] },
-          projects: { nodes: [{ id: "proj-1", name: PROJECT }] },
-        },
-      } as T;
-    }
-    if (query.includes("issueCreate")) {
-      const input = variables.input as Record<string, unknown>;
-      const stateNode = {
-        "s-todo": { name: "Todo", type: "unstarted" },
-        "s-doing": { name: "Cooking", type: "started" },
-        "s-done": { name: "Shipped", type: "completed" },
-      }[input.stateId as string] ?? { name: "Todo", type: "unstarted" };
-      const node = this.seed({
-        identifier: `${TEAM}-${++this.seq}`,
-        title: input.title as string,
-        description: input.description as string,
-        state: stateNode,
-        priority: Number(input.priority ?? 0),
-        labels: { nodes: labelNodes(input.labelIds as string[] | undefined) },
-      });
-      return { issueCreate: { success: true, issue: node } } as T;
-    }
-    if (query.includes("issueUpdate")) {
-      const id = variables.id as string;
-      const input = variables.input as Record<string, string>;
-      const issue = this.issues.find((node) => node.identifier === id);
-      if (!issue) throw new AxiError("no such issue", "NOT_FOUND");
-      if (input.title !== undefined) issue.title = input.title;
-      if (input.description !== undefined) issue.description = input.description;
-      if (input.stateId !== undefined) {
-        issue.state = {
-          "s-todo": { name: "Todo", type: "unstarted" },
-          "s-doing": { name: "Cooking", type: "started" },
-          "s-done": { name: "Shipped", type: "completed" },
-        }[input.stateId] ?? issue.state;
-      }
-      if (input.priority !== undefined) issue.priority = Number(input.priority);
-      issue.updatedAt = new Date(Date.now() + this.seq).toISOString();
-      return { issueUpdate: { success: true, issue } } as T;
-    }
-    if (query.includes("issueArchive")) {
-      const id = variables.id as string;
-      this.issues = this.issues.filter((node) => node.identifier !== id);
-      return { issueArchive: { success: true } } as T;
-    }
-    if (query.includes("issueLabelCreate")) {
-      const input = variables.input as Record<string, string>;
-      return {
-        issueLabelCreate: {
-          success: true,
-          issueLabel: { id: `l-${input.name}`, name: input.name },
-        },
-      } as T;
-    }
-    if (query.includes("issueRelationCreate")) {
-      const input = variables.input as Record<string, string>;
-      this.relations.push({
-        id: `rel-${this.relations.length + 1}`,
-        blocked: input.relatedIssueId,
-        blocker: input.issueId,
-      });
-      return { issueRelationCreate: { success: true } } as T;
-    }
-    if (query.includes("issueRelationDelete")) {
-      const id = variables.id as string;
-      this.relations = this.relations.filter((relation) => relation.id !== id);
-      return { issueRelationDelete: { success: true } } as T;
-    }
-    if (query.includes("inverseRelations")) {
-      const id = variables.id as string;
-      return {
-        issue: {
-          inverseRelations: {
-            nodes: this.relations
-              .filter((relation) => relation.blocked === id)
-              .map((relation) => ({
-                id: relation.id,
-                type: "blocks",
-                issue: { identifier: relation.blocker },
-              })),
-          },
-        },
-      } as T;
-    }
-    throw new Error(`unhandled query: ${query.slice(0, 60)}`);
-  }
-}
 
 describe("linear backend", () => {
   let dir: string;
@@ -622,6 +430,185 @@ describe("linear backend", () => {
       });
       const { items } = await makeStore().list({});
       expect(items[0]!.kind).toBe("scout");
+    });
+  });
+
+  describe("typed holds", () => {
+    const labelsOf = (identifier: string): string[] =>
+      (
+        fake.issues.find((issue) => issue.identifier === identifier)?.labels
+          .nodes ?? []
+      ).map((node) => node.name);
+
+    it("writes a hold/<kind> label plus the reason and date in fm-meta", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "held", title: "t" });
+      await store.update("held", {
+        hold: { reason: "captain decision pending", kind: "captain", until: "2026-09-10" },
+      });
+
+      // The label is what makes a hold filterable server-side in Linear.
+      expect(labelsOf("DEV-1")).toContain("hold/captain");
+      const task = await store.get("held");
+      expect(task?.hold).toEqual({
+        reason: "captain decision pending",
+        kind: "captain",
+        until: "2026-09-10",
+      });
+    });
+
+    it("labels an untyped hold with the bare hold label", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "plain", title: "t" });
+      await store.update("plain", { hold: { reason: "waiting" } });
+      expect(labelsOf("DEV-1")).toContain("hold");
+      expect(labelsOf("DEV-1")).not.toContain("hold/captain");
+    });
+
+    it("re-holding with the same kind and reason writes nothing", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "idem", title: "t" });
+      const hold = { reason: "r", kind: "captain" as const };
+      await store.update("idem", { hold });
+
+      fake.reset();
+      const again = await store.update("idem", { hold });
+      // No `changed` fields means no issueUpdate: idempotence is not "write
+      // the same thing twice", it is "do not write at all".
+      expect(again.changed).toEqual([]);
+      expect(fake.calls.some((call) => call.operation === "update")).toBe(false);
+      expect(labelsOf("DEV-1").filter((name) => name === "hold/captain")).toHaveLength(1);
+    });
+
+    it("swaps the label when the hold kind changes", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "swap", title: "t" });
+      await store.update("swap", { hold: { reason: "r", kind: "captain" } });
+      await store.update("swap", { hold: { reason: "r", kind: "load" } });
+      expect(labelsOf("DEV-1")).toContain("hold/load");
+      expect(labelsOf("DEV-1")).not.toContain("hold/captain");
+    });
+
+    it("clears the label on unhold and leaves the task otherwise intact", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "clear", title: "t", repo: "tasks-axi" });
+      await store.update("clear", { hold: { reason: "r", kind: "external" } });
+      await store.update("clear", { hold: null });
+
+      expect(labelsOf("DEV-1").some((name) => name.startsWith("hold"))).toBe(false);
+      expect(labelsOf("DEV-1")).toContain("repo/tasks-axi");
+      expect((await store.get("clear"))?.hold).toBeUndefined();
+    });
+
+    it("preserves labels tasks-axi does not manage", async () => {
+      // A human's own label must survive a hold: `labelIds` is a replacement,
+      // not a merge, so this is the regression that guards it.
+      fake.seed({
+        identifier: "DEV-9",
+        description: meta("human"),
+        labels: { nodes: [{ id: "l-Feature", name: "Feature" }, { id: "l-fm", name: "fm" }] },
+      });
+      const store = makeStore(0);
+      await store.update("human", { hold: { reason: "r", kind: "captain" } });
+      expect(labelsOf("DEV-9")).toEqual(
+        expect.arrayContaining(["Feature", "fm", "hold/captain"]),
+      );
+    });
+  });
+
+  describe("cross-home mv", () => {
+    const otherStore = (): LinearStore =>
+      new LinearStore({
+        team: TEAM,
+        project: OTHER_PROJECT,
+        cacheTtl: 0,
+        mirrorPath: join(dir, "other", "backlog.md"),
+        client: fake,
+        now: () => "2026-06-01",
+      });
+
+    const projectOfIssue = (identifier: string): string | undefined =>
+      fake.issues.find((issue) => issue.identifier === identifier)?.project?.name;
+
+    it("moves a whole connected set and preserves its blocking edges", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "b", title: "sibling" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      const other = otherStore();
+      const moved = await store.moveManyTo(["a", "b", "c"], other);
+      expect(moved.map((task) => task.id)).toEqual(["a", "b", "c"]);
+
+      // Reassigned, not recreated: the relation is a property of the issue
+      // pair, so the edge survives the move untouched.
+      expect((await store.list({})).items).toEqual([]);
+      const arrived = await other.get("c");
+      expect(arrived?.deps).toEqual([{ type: "blocked-by", id: "a" }]);
+      expect(projectOfIssue("DEV-1")).toBe(OTHER_PROJECT);
+    });
+
+    it("refuses a move that would strand a dependent, naming it", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "b", title: "sibling" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      await expect(store.moveManyTo(["a", "b"], otherStore())).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining("c"),
+      });
+      // Nothing moved: the check runs before any write.
+      expect(projectOfIssue("DEV-1")).toBe(PROJECT);
+      expect(projectOfIssue("DEV-2")).toBe(PROJECT);
+    });
+
+    it("refuses a move whose blocker would be left behind, naming it", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      await expect(store.moveManyTo(["c"], otherStore())).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining("stranded"),
+      });
+    });
+
+    it("moves the whole set in one batched request", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "t" });
+      await store.create({ id: "b", title: "t" });
+      fake.reset();
+      await store.moveManyTo(["a", "b"], otherStore());
+      // One mutation for the set, not one per issue: a partial failure would
+      // split the very edges the connected-set check protects.
+      expect(fake.calls.filter((call) => call.operation === "mv")).toHaveLength(1);
+    });
+
+    it("refuses a destination that already holds the id", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "dup", title: "t" });
+      const other = otherStore();
+      fake.seed({
+        identifier: "DEV-99",
+        description: meta("dup"),
+        project: { name: OTHER_PROJECT },
+      });
+      await expect(store.moveManyTo(["dup"], other)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+    });
+
+    it("fails loud rather than half-moving when Linear is unreachable", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "t" });
+      fake.offline = true;
+      await expect(store.moveManyTo(["a"], otherStore())).rejects.toMatchObject({
+        code: "UNSUPPORTED",
+      });
     });
   });
 

@@ -10,6 +10,7 @@
 
 /** The per-issue selection the whole backend is built on. */
 const ISSUE_FIELDS = `
+  id
   identifier
   title
   description
@@ -18,7 +19,7 @@ const ISSUE_FIELDS = `
   createdAt
   updatedAt
   state { name type }
-  labels(first: 20) { nodes { name } }
+  labels(first: 20) { nodes { id name } }
   project { name }
   inverseRelations(first: 50) { nodes { type issue { identifier } } }
 `;
@@ -92,6 +93,21 @@ export const RELATION_CREATE_MUTATION = `mutation TasksAxiRelationCreate($input:
 
 export const RELATION_DELETE_MUTATION = `mutation TasksAxiRelationDelete($id: String!) {
   issueRelationDelete(id: $id) { success }
+}`;
+
+/**
+ * Reassign a whole set of issues in one request. `mv` moves a connected set
+ * between homes, and a per-issue loop could fail halfway and strand a
+ * dependency edge across two projects; `issueBatchUpdate` applies the change
+ * to every issue server-side or to none, which is the atomicity the markdown
+ * backend gets from a two-file lock. It addresses issues by UUID, not by the
+ * `DEV-44` identifier, which is why `id` is part of the issue selection.
+ */
+export const ISSUE_BATCH_UPDATE_MUTATION = `mutation TasksAxiBatchUpdate($ids: [UUID!]!, $input: IssueUpdateInput!) {
+  issueBatchUpdate(ids: $ids, input: $input) {
+    success
+    issues { identifier }
+  }
 }`;
 
 /**

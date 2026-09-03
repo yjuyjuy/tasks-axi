@@ -18,6 +18,12 @@ export interface TasksContext {
   store: Store;
   config: ResolvedConfig;
   suggestionGlobals?: SuggestionGlobals;
+  /**
+   * How a *second* home's store is built - `mv` needs one for its destination.
+   * The resolver installs the real factory; a test injects a fake-client one so
+   * a cross-home move can be exercised without the network.
+   */
+  storeFactory?: (config: ResolvedConfig) => Store;
 }
 
 export function resolveTasksContext(
@@ -29,11 +35,12 @@ export function resolveTasksContext(
   return {
     store: createStore(config),
     config,
+    storeFactory: createStore,
     ...(suggestionGlobals ? { suggestionGlobals } : {}),
   };
 }
 
-function createStore(config: ResolvedConfig): Store {
+export function createStore(config: ResolvedConfig): Store {
   if (config.backend === "markdown") {
     return new MarkdownStore({
       path: config.path,
