@@ -28,6 +28,19 @@ export const meta = (slug: string): string => ["```fm-meta", `slug: ${slug}`, "`
 const labelNodes = (ids: string[] | undefined): { name: string }[] =>
   (ids ?? []).map((id) => ({ name: id.replace(/^l-/, "") }));
 
+/**
+ * The team's pre-existing labels, including the `Hold` **group** the real DEV
+ * team already had. The group is what makes a flat label named `hold`
+ * unassignable, and modelling it here is what turns the live failure into a
+ * reproducible test.
+ */
+interface FakeLabel {
+  id: string;
+  name: string;
+  isGroup?: boolean;
+  parent?: { name: string } | null;
+}
+
 interface FakeOptions {
   /** Fail every request with a network error, simulating a blocked network. */
   offline?: boolean;
@@ -39,6 +52,19 @@ export class FakeLinear implements LinearClientLike {
   issues: LinearIssueNode[] = [];
   offline = false;
   private seq = 0;
+  /**
+   * The team's labels. `Hold` is a group with the children a human created,
+   * mirroring the real DEV team; `fm` is flat.
+   */
+  readonly labels: FakeLabel[] = [
+    { id: "l-fm", name: "fm" },
+    // Workspace-scoped, exactly like the real team's group.
+    { id: "l-Hold", name: "Hold", isGroup: true },
+    { id: "l-External", name: "External", parent: { name: "Hold" } },
+    { id: "l-Parked", name: "Parked", parent: { name: "Hold" } },
+    { id: "l-Future", name: "Future", parent: { name: "Hold" } },
+    { id: "l-Feature", name: "Feature" },
+  ];
   private relations: { id: string; blocked: string; blocker: string }[] = [];
 
   constructor(options: FakeOptions = {}) {
@@ -75,6 +101,23 @@ export class FakeLinear implements LinearClientLike {
     };
     this.issues.push(node);
     return node;
+  }
+
+  /**
+   * Linear refuses to assign a group label directly to an issue. This is the
+   * exact error the live run hit, so the fake reproduces it rather than
+   * accepting a write the real API would reject.
+   */
+  private assertAssignable(ids: string[] | undefined): void {
+    for (const id of ids ?? []) {
+      const label = this.labels.find((candidate) => candidate.id === id);
+      if (label?.isGroup) {
+        throw new AxiError(
+          `The label '${label.name}' is a group and cannot be assigned to issues directly.`,
+          "UNKNOWN",
+        );
+      }
+    }
   }
 
   private withRelations(): LinearIssueNode[] {
@@ -155,7 +198,7 @@ export class FakeLinear implements LinearClientLike {
               { id: "s-done", name: "Shipped", type: "completed", position: 3 },
             ],
           },
-          labels: { nodes: [{ id: "l-fm", name: "fm" }] },
+          labels: { nodes: this.labels },
           projects: {
             nodes: [{ id: `proj-${project.replace(/\s+/g, "-")}`, name: project }],
           },
@@ -164,6 +207,7 @@ export class FakeLinear implements LinearClientLike {
     }
     if (query.includes("issueCreate")) {
       const input = variables.input as Record<string, unknown>;
+      this.assertAssignable(input.labelIds as string[] | undefined);
       const stateNode = {
         "s-todo": { name: "Todo", type: "unstarted" },
         "s-doing": { name: "Cooking", type: "started" },
@@ -209,6 +253,7 @@ export class FakeLinear implements LinearClientLike {
       if (input.title !== undefined) issue.title = input.title;
       if (input.description !== undefined) issue.description = input.description;
       if (input.labelIds !== undefined) {
+        this.assertAssignable(input.labelIds as unknown as string[]);
         issue.labels = {
           nodes: labelNodes(input.labelIds as unknown as string[]),
         };
@@ -231,10 +276,32 @@ export class FakeLinear implements LinearClientLike {
     }
     if (query.includes("issueLabelCreate")) {
       const input = variables.input as Record<string, string>;
+      if (input.parentId && input.teamId) {
+        // Caught live: the `Hold` group is workspace-scoped, so a child that
+        // also carries a teamId is refused. A nested label inherits its
+        // parent's scope and must not name a team.
+        throw new AxiError(
+          "Cannot add a label to a group from a different team.",
+          "UNKNOWN",
+        );
+      }
+      const parent = input.parentId
+        ? this.labels.find((label) => label.id === input.parentId)
+        : undefined;
+      const label: FakeLabel = {
+        id: `l-${input.name}`,
+        name: input.name,
+        ...(parent ? { parent: { name: parent.name } } : {}),
+      };
+      this.labels.push(label);
       return {
         issueLabelCreate: {
           success: true,
-          issueLabel: { id: `l-${input.name}`, name: input.name },
+          issueLabel: {
+            id: label.id,
+            name: label.name,
+            parent: label.parent ?? null,
+          },
         },
       } as T;
     }
@@ -271,4 +338,3 @@ export class FakeLinear implements LinearClientLike {
     throw new Error(`unhandled query: ${query.slice(0, 60)}`);
   }
 }
-

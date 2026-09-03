@@ -53,7 +53,7 @@ export const RESOLVE_QUERY = `query TasksAxiResolve($teamKey: String!, $project:
     id
     key
     states(first: $first) { nodes { id name type position } }
-    labels(first: $first) { nodes { id name } }
+    labels(first: $first) { nodes { id name isGroup parent { name } } }
     projects(first: $first, filter: { name: { eqIgnoreCase: $project } }) {
       nodes { id name }
     }
@@ -84,7 +84,7 @@ export const ISSUE_ARCHIVE_MUTATION = `mutation TasksAxiArchive($id: String!) {
 }`;
 
 export const LABEL_CREATE_MUTATION = `mutation TasksAxiLabelCreate($input: IssueLabelCreateInput!) {
-  issueLabelCreate(input: $input) { success issueLabel { id name } }
+  issueLabelCreate(input: $input) { success issueLabel { id name parent { name } } }
 }`;
 
 export const RELATION_CREATE_MUTATION = `mutation TasksAxiRelationCreate($input: IssueRelationCreateInput!) {

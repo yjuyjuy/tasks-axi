@@ -44,30 +44,59 @@ export const REPO_LABEL_PREFIX = "repo/";
 /** Every issue this backend owns carries the fleet label. */
 export const FM_LABEL = "fm";
 /**
- * The label a held issue carries, so a hold is filterable server-side in
- * Linear's own UI (`label:hold/captain`) without reading any description.
+ * Holds are expressed as a Linear **label group**, not as flat `hold/<kind>`
+ * names.
  *
- * A hold kind is optional in the model, so an untyped hold carries the bare
- * `hold` label and a typed one carries `hold/<kind>`; no kind is ever invented.
- * The label is derived state: `fm-meta` remains the authoritative record of the
- * reason and the `until` date, because Linear has no column for either.
+ * This is Linear's own convention for exactly this shape, and the DEV team was
+ * already using it - a `Hold` group with `External`, `Parked`, `Future`
+ * children - before tasks-axi wrote anything. Two things follow. A flat label
+ * named `hold` is *rejected* by the API when a `Hold` group exists ("is a group
+ * and cannot be assigned to issues directly"), and a group is mutually
+ * exclusive in Linear's UI, so an issue can never carry two hold kinds at once.
+ * Reusing the group therefore fixes a real failure and makes a hold filterable
+ * with the team's existing saved views.
+ *
+ * `fm-meta` stays the authoritative record of the reason and the `until` date,
+ * which Linear has no column for; the label is the filterable projection.
  */
-export const HOLD_LABEL = "hold";
-export const HOLD_LABEL_PREFIX = "hold/";
+export const HOLD_GROUP = "Hold";
+/** A hold with no kind still has to be filterable, so it gets its own child. */
+export const HOLD_UNSPECIFIED = "Unspecified";
+/** Legacy flat names an earlier build could have written; recognized so they are cleaned up. */
+const LEGACY_HOLD_PREFIX = "hold";
+
+/** A hold label is `<Hold group>/<Kind>`; the child name carries the kind. */
+export interface HoldLabelRef {
+  group: string;
+  name: string;
+}
 
 export function repoLabel(repo: string): string {
   return `${REPO_LABEL_PREFIX}${repo}`;
 }
 
-/** The label name for a hold, or undefined when the task is not held. */
-export function holdLabel(hold: Hold | undefined): string | undefined {
+/**
+ * The group child a hold should map to, or undefined when the task is not held.
+ * The child name is title-cased to match the sibling labels a human created.
+ */
+export function holdLabel(hold: Hold | undefined): HoldLabelRef | undefined {
   if (!hold) return undefined;
-  return hold.kind ? `${HOLD_LABEL_PREFIX}${hold.kind}` : HOLD_LABEL;
+  const kind = hold.kind ?? HOLD_UNSPECIFIED;
+  return {
+    group: HOLD_GROUP,
+    name: kind.charAt(0).toUpperCase() + kind.slice(1).toLowerCase(),
+  };
 }
 
-export function isHoldLabel(name: string): boolean {
+/**
+ * True for a label this backend manages as a hold: any child of the `Hold`
+ * group, plus the flat `hold` / `hold/<kind>` names an earlier build wrote, so
+ * a stale one is cleaned up on the next hold write rather than lingering.
+ */
+export function isHoldLabel(name: string, parent?: string): boolean {
+  if (parent && parent.toLowerCase() === HOLD_GROUP.toLowerCase()) return true;
   const lower = name.toLowerCase();
-  return lower === HOLD_LABEL || lower.startsWith(HOLD_LABEL_PREFIX);
+  return lower === LEGACY_HOLD_PREFIX || lower.startsWith(`${LEGACY_HOLD_PREFIX}/`);
 }
 
 function repoFromLabels(labels: string[]): string | undefined {

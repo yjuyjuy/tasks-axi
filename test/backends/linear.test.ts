@@ -440,15 +440,19 @@ describe("linear backend", () => {
           .nodes ?? []
       ).map((node) => node.name);
 
-    it("writes a hold/<kind> label plus the reason and date in fm-meta", async () => {
+    it("writes a Hold group label plus the reason and date in fm-meta", async () => {
       const store = makeStore(0);
       await store.create({ id: "held", title: "t" });
       await store.update("held", {
         hold: { reason: "captain decision pending", kind: "captain", until: "2026-09-10" },
       });
 
-      // The label is what makes a hold filterable server-side in Linear.
-      expect(labelsOf("DEV-1")).toContain("hold/captain");
+      // The label is what makes a hold filterable server-side in Linear, and
+      // it is a child of the team's existing `Hold` group, not a flat name.
+      expect(labelsOf("DEV-1")).toContain("Captain");
+      expect(
+        fake.labels.find((label) => label.name === "Captain")?.parent?.name,
+      ).toBe("Hold");
       const task = await store.get("held");
       expect(task?.hold).toEqual({
         reason: "captain decision pending",
@@ -457,12 +461,23 @@ describe("linear backend", () => {
       });
     });
 
-    it("labels an untyped hold with the bare hold label", async () => {
+    it("labels an untyped hold with the group's Unspecified child", async () => {
       const store = makeStore(0);
       await store.create({ id: "plain", title: "t" });
       await store.update("plain", { hold: { reason: "waiting" } });
-      expect(labelsOf("DEV-1")).toContain("hold");
-      expect(labelsOf("DEV-1")).not.toContain("hold/captain");
+      // Never the bare group name: Linear rejects assigning a group directly,
+      // which is the live failure this case pins down.
+      expect(labelsOf("DEV-1")).toContain("Unspecified");
+      expect(labelsOf("DEV-1")).not.toContain("Hold");
+    });
+
+    it("reuses a hold child the team already created", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "reuse", title: "t" });
+      await store.update("reuse", { hold: { reason: "r", kind: "external" } });
+      expect(labelsOf("DEV-1")).toContain("External");
+      // `External` predates tasks-axi, so no duplicate is minted.
+      expect(fake.labels.filter((label) => label.name === "External")).toHaveLength(1);
     });
 
     it("re-holding with the same kind and reason writes nothing", async () => {
@@ -477,7 +492,7 @@ describe("linear backend", () => {
       // the same thing twice", it is "do not write at all".
       expect(again.changed).toEqual([]);
       expect(fake.calls.some((call) => call.operation === "update")).toBe(false);
-      expect(labelsOf("DEV-1").filter((name) => name === "hold/captain")).toHaveLength(1);
+      expect(labelsOf("DEV-1").filter((name) => name === "Captain")).toHaveLength(1);
     });
 
     it("swaps the label when the hold kind changes", async () => {
@@ -485,8 +500,9 @@ describe("linear backend", () => {
       await store.create({ id: "swap", title: "t" });
       await store.update("swap", { hold: { reason: "r", kind: "captain" } });
       await store.update("swap", { hold: { reason: "r", kind: "load" } });
-      expect(labelsOf("DEV-1")).toContain("hold/load");
-      expect(labelsOf("DEV-1")).not.toContain("hold/captain");
+      // A Linear label group is mutually exclusive, and so is a hold kind.
+      expect(labelsOf("DEV-1")).toContain("Load");
+      expect(labelsOf("DEV-1")).not.toContain("Captain");
     });
 
     it("clears the label on unhold and leaves the task otherwise intact", async () => {
@@ -495,9 +511,37 @@ describe("linear backend", () => {
       await store.update("clear", { hold: { reason: "r", kind: "external" } });
       await store.update("clear", { hold: null });
 
-      expect(labelsOf("DEV-1").some((name) => name.startsWith("hold"))).toBe(false);
+      expect(labelsOf("DEV-1")).not.toContain("External");
       expect(labelsOf("DEV-1")).toContain("repo/tasks-axi");
       expect((await store.get("clear"))?.hold).toBeUndefined();
+    });
+
+    it("never assigns the group label itself, which Linear rejects", async () => {
+      // Caught live: a flat label named `hold` collided with the team's
+      // existing `Hold` group and Linear refused the write with "is a group
+      // and cannot be assigned to issues directly". Every hold kind, and the
+      // untyped case, must resolve to a child of that group.
+      const store = makeStore(0);
+      await store.create({ id: "group-safe", title: "t" });
+      for (const kind of ["captain", "external", "load", "parked", "future"] as const) {
+        await store.update("group-safe", { hold: { reason: "r", kind } });
+        expect(labelsOf("DEV-1")).not.toContain("Hold");
+      }
+      await store.update("group-safe", { hold: { reason: "r" } });
+      expect(labelsOf("DEV-1")).not.toContain("Hold");
+      expect(labelsOf("DEV-1")).toContain("Unspecified");
+    });
+
+    it("cleans up a flat hold label written by an earlier build", async () => {
+      fake.seed({
+        identifier: "DEV-7",
+        description: meta("legacy"),
+        labels: { nodes: [{ id: "l-hold/captain", name: "hold/captain" }] },
+      });
+      const store = makeStore(0);
+      await store.update("legacy", { hold: { reason: "r", kind: "parked" } });
+      expect(labelsOf("DEV-7")).not.toContain("hold/captain");
+      expect(labelsOf("DEV-7")).toContain("Parked");
     });
 
     it("preserves labels tasks-axi does not manage", async () => {
@@ -511,7 +555,7 @@ describe("linear backend", () => {
       const store = makeStore(0);
       await store.update("human", { hold: { reason: "r", kind: "captain" } });
       expect(labelsOf("DEV-9")).toEqual(
-        expect.arrayContaining(["Feature", "fm", "hold/captain"]),
+        expect.arrayContaining(["Feature", "fm", "Captain"]),
       );
     });
   });
@@ -600,6 +644,47 @@ describe("linear backend", () => {
       await expect(store.moveManyTo(["dup"], other)).rejects.toMatchObject({
         code: "CONFLICT",
       });
+    });
+
+    it("lets the next process in either home see the move", async () => {
+      // Caught live: `mv` is the one mutation with nothing to read back, so a
+      // pre-move snapshot survived on disk and the next process in BOTH homes
+      // still listed the old contents for the whole TTL. A long TTL is the
+      // point of the test - a 0 TTL would hide the bug.
+      const store = new LinearStore({
+        team: TEAM,
+        project: PROJECT,
+        cacheTtl: 600,
+        mirrorPath: mirror,
+        client: fake,
+        now: () => "2026-06-01",
+      });
+      await store.create({ id: "a", title: "t" });
+      const otherMirror = join(dir, "other", "backlog.md");
+      const makeOther = (): LinearStore =>
+        new LinearStore({
+          team: TEAM,
+          project: OTHER_PROJECT,
+          cacheTtl: 600,
+          mirrorPath: otherMirror,
+          client: fake,
+          now: () => "2026-06-01",
+        });
+      const other = makeOther();
+      await other.list({});
+      await store.moveManyTo(["a"], other);
+
+      // Fresh stores are fresh processes: only the on-disk cache carries over.
+      const sourceAfter = new LinearStore({
+        team: TEAM,
+        project: PROJECT,
+        cacheTtl: 600,
+        mirrorPath: mirror,
+        client: fake,
+        now: () => "2026-06-01",
+      });
+      expect((await sourceAfter.list({})).items).toEqual([]);
+      expect((await makeOther().list({})).items.map((task) => task.id)).toEqual(["a"]);
     });
 
     it("fails loud rather than half-moving when Linear is unreachable", async () => {

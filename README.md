@@ -204,6 +204,8 @@ Maintenance commands are explicit exceptions: `render` normalizes every recogniz
 To move a dependency-connected set, include every linked blocker and active dependent in the same command, unless the other endpoint already exists in the destination backlog.
 The command refuses a move that would strand a dependency across the two files, while preserving intra-set `blocked-by` links and their reason strings.
 Moved tasks are re-rendered canonically, so their multi-paragraph bodies remain intact but a trailing blank separator before the next item or section is dropped.
+`--to` also accepts another task home's directory, which moves the set between homes (on the `linear` backend, between projects) in one transaction.
+Both homes must use the same backend: a `markdown`-to-`linear` move is refused with a structured `UNSUPPORTED` error rather than being half-performed.
 
 The read-modify-write window is guarded by an advisory lockfile, an atomic write (temp file + rename), and a fresh re-read on every invocation, so a hand-edit and a CLI-edit cannot clobber each other.
 Task state is carried by the section header, not by the bullet style: `## In flight`, `## Queued`, and `## Done` decide whether a recognized item is in flight, queued, or done.
@@ -274,11 +276,13 @@ cache_ttl = 60               # seconds a cached snapshot is reused
 
 `LINEAR_API_KEY` is read from the environment, never from config. `TASKS_AXI_LINEAR_TEAM` and `TASKS_AXI_LINEAR_PROJECT` override the table.
 
-Three behaviours are worth knowing:
+Five behaviours are worth knowing:
 
 - **Workflow states are matched by type, not name.** Renaming `In Progress` to anything, or adding `PR Ready`, changes nothing. A `canceled` issue reads as done.
 - **A whole command costs one request.** The backlog is fetched in one batched query and cached on disk, so a `show` loop over many ids stays cheap; within the TTL a command makes no request at all.
 - **Reads degrade, writes do not.** Every sync rewrites a read-only markdown mirror at the configured backlog path, so reads keep working when Linear is unreachable. A mutation fails with a clear error rather than diverging from the tracker.
+- **A hold is also a Linear label.** `hold --kind captain` adds a `Captain` label under Linear's standard `Hold` label group (an untyped hold becomes `Unspecified`), so holds are filterable in Linear's own UI while `fm-meta` stays authoritative for the reason and until-date. Labels you added yourself are preserved; only `fm`, `repo/*`, and hold labels are managed. Re-holding with the same reason and kind makes no request at all, and an expired `--until` releases the task back into `ready` without any write.
+- **`mv --to <other home>` moves tasks between projects.** The whole connected set is reassigned in a single batched mutation, and blocking relations survive because a relation belongs to the issue pair, not the project. A move that would strand a dependency in the source project is refused and names the offending task.
 
 Fields Linear has no column for (`kind`, holds, `resume`, report links, dependency reasons) live in an `fm-meta` block at the top of the issue description. Editing it by hand is safe: unparseable metadata is ignored rather than failing the read.
 

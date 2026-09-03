@@ -1,3 +1,4 @@
+import { rmSync } from "node:fs";
 import { AxiError, crossBackendMove, unsupported } from "../errors.js";
 import { validateDependencyId, validateId } from "../id.js";
 import type {
@@ -114,7 +115,12 @@ interface ResolveTables {
   teamId: string;
   projectId: string;
   states: { id: string; name: string; type: string; position: number }[];
-  labels: { id: string; name: string }[];
+  labels: {
+    id: string;
+    name: string;
+    isGroup?: boolean;
+    parent?: { name: string } | null;
+  }[];
 }
 
 function today(): string {
@@ -318,10 +324,27 @@ export class LinearStore implements Store {
     return snapshot.issues.map((issue) => toTask(issue, slugs));
   }
 
-  /** Drop the cached snapshot so the next read reflects a write we just made. */
+  /**
+   * Drop the cached snapshot so the next read reflects a write we just made -
+   * in this process *and* in the next one.
+   *
+   * Dropping only the in-memory copy is not enough. Most commands read back
+   * after writing, which refreshes the on-disk cache as a side effect, but a
+   * command that does not (`mv` moves a set and reports, without re-reading)
+   * would leave a pre-write snapshot on disk for the whole TTL, and the next
+   * process would serve it and show the write as not having happened. Caught
+   * live: after a successful cross-home move, both homes still listed the old
+   * contents. Deleting the file is safe because it is derived data, and the
+   * offline read path falls back to the markdown mirror.
+   */
   private invalidate(): void {
     this.snapshot = undefined;
     this.mustRefetch = true;
+    try {
+      rmSync(this.cachePath, { force: true });
+    } catch {
+      // A cache we cannot delete is a cache the next read revalidates anyway.
+    }
   }
 
   /**
@@ -422,17 +445,82 @@ export class LinearStore implements Store {
     task: { repo?: string; hold?: Task["hold"] },
     existing: string[] = [],
   ): Promise<string[]> {
+    const parentOf = (name: string): string | undefined =>
+      tables.labels.find(
+        (label) => label.name.toLowerCase() === name.toLowerCase(),
+      )?.parent?.name;
     const managed = (name: string): boolean =>
       name.toLowerCase() === FM_LABEL ||
       name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
-      isHoldLabel(name);
-    const wanted = [
+      isHoldLabel(name, parentOf(name));
+    const hold = holdLabel(task.hold);
+    const ids = await this.ensureLabelIds(tables, [
       ...existing.filter((name) => !managed(name)),
       FM_LABEL,
       ...(task.repo ? [repoLabel(task.repo)] : []),
-      ...(holdLabel(task.hold) ? [holdLabel(task.hold) as string] : []),
-    ];
-    return this.ensureLabelIds(tables, wanted);
+    ]);
+    if (hold) ids.push(await this.holdLabelId(tables, hold));
+    return [...new Set(ids)];
+  }
+
+  /**
+   * The id of the `Hold` group child for a hold kind, creating the group and
+   * the child if the team does not have them yet. Nesting under the group is
+   * what makes the label assignable at all - Linear rejects a flat label whose
+   * name collides with a group - and makes hold kinds mutually exclusive.
+   */
+  private async holdLabelId(
+    tables: ResolveTables,
+    hold: { group: string; name: string },
+  ): Promise<string> {
+    const group = tables.labels.find(
+      (label) =>
+        label.name.toLowerCase() === hold.group.toLowerCase() && label.isGroup,
+    );
+    const groupId =
+      group?.id ??
+      (await this.createLabel(tables, hold.group, undefined, true)).id;
+    const existing = tables.labels.find(
+      (label) =>
+        label.name.toLowerCase() === hold.name.toLowerCase() &&
+        label.parent?.name.toLowerCase() === hold.group.toLowerCase(),
+    );
+    if (existing) return existing.id;
+    return (await this.createLabel(tables, hold.name, groupId, false)).id;
+  }
+
+  private async createLabel(
+    tables: ResolveTables,
+    name: string,
+    parentId: string | undefined,
+    isGroup: boolean,
+  ): Promise<{ id: string; name: string }> {
+    const created = await this.request<{
+      issueLabelCreate: {
+        success: boolean;
+        issueLabel: { id: string; name: string; parent?: { name: string } | null };
+      };
+    }>(
+      LABEL_CREATE_MUTATION,
+      {
+        input: {
+          name,
+          // A child inherits its parent's scope. The `Hold` group is a
+          // workspace label here, and Linear refuses "a label to a group from a
+          // different team", so a nested label must NOT carry a teamId - only a
+          // top-level label this backend mints itself is team-scoped.
+          ...(parentId ? { parentId } : { teamId: tables.teamId }),
+        },
+      },
+      "label",
+    );
+    const label = created.issueLabelCreate.issueLabel;
+    tables.labels.push({
+      ...label,
+      isGroup,
+      parent: label.parent ?? null,
+    });
+    return label;
   }
 
   /**
@@ -454,15 +542,7 @@ export class LinearStore implements Store {
         if (!ids.includes(existing.id)) ids.push(existing.id);
         continue;
       }
-      const created = await this.request<{
-        issueLabelCreate: { success: boolean; issueLabel: { id: string; name: string } };
-      }>(
-        LABEL_CREATE_MUTATION,
-        { input: { name, teamId: tables.teamId } },
-        "label",
-      );
-      const label = created.issueLabelCreate.issueLabel;
-      tables.labels.push(label);
+      const label = await this.createLabel(tables, name, undefined, false);
       if (!ids.includes(label.id)) ids.push(label.id);
     }
     return ids;
@@ -1125,6 +1205,12 @@ export class LinearStore implements Store {
 
     this.invalidate();
     target.invalidate();
+    // Re-sync both homes now rather than leaving each with no cache and no
+    // mirror: a move is the one mutation with nothing to read back, and the
+    // next command in either home would otherwise pay for the refetch and
+    // find no mirror to fall back on offline.
+    await this.fetchSnapshot();
+    await target.fetchSnapshot();
     return moving;
   }
 
