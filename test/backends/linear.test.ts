@@ -4,213 +4,21 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AxiError } from "../../src/errors.js";
 import { LinearStore } from "../../src/backends/linear.js";
-import type { LinearClientLike } from "../../src/backends/linear-client.js";
-import type { LinearIssueNode } from "../../src/backends/linear-map.js";
+import {
+  FakeLinear,
+  OTHER_PROJECT,
+  PROJECT,
+  TEAM,
+  meta,
+} from "../linear-fake.js";
 
 /**
  * The linear backend is tested against an injected fake client rather than the
  * network: the fake models Linear's response shapes and records every request,
  * which is what lets these tests assert the batching and offline guarantees
- * (DEV-44 acceptance criteria 3 and 4) deterministically in CI.
+ * (DEV-44 acceptance criteria 3 and 4) deterministically in CI. The fake lives
+ * in `test/linear-fake.ts` because the CLI-level tests need it too.
  */
-
-const TEAM = "DEV";
-const PROJECT = "Test Home";
-
-/** An `fm-meta` description carrying just the slug join key. */
-const meta = (slug: string): string => ["```fm-meta", `slug: ${slug}`, "```"].join("\n");
-
-/**
- * Label ids round-trip back to names the way Linear does. The backend mints an
- * id of `l-<name>` for a label it creates, so the name is recoverable.
- */
-const labelNodes = (ids: string[] | undefined): { name: string }[] =>
-  (ids ?? []).map((id) => ({ name: id.replace(/^l-/, "") }));
-
-interface FakeOptions {
-  /** Fail every request with a network error, simulating a blocked network. */
-  offline?: boolean;
-}
-
-class FakeLinear implements LinearClientLike {
-  /** Every request, in order, as `operation` labels. */
-  readonly calls: { operation: string; query: string }[] = [];
-  issues: LinearIssueNode[] = [];
-  offline = false;
-  private seq = 0;
-  private relations: { id: string; blocked: string; blocker: string }[] = [];
-
-  constructor(options: FakeOptions = {}) {
-    this.offline = options.offline ?? false;
-  }
-
-  /** Requests that actually crossed the wire, for batching assertions. */
-  get requestCount(): number {
-    return this.calls.length;
-  }
-
-  get syncCount(): number {
-    return this.calls.filter((call) => call.operation === "sync").length;
-  }
-
-  reset(): void {
-    this.calls.length = 0;
-  }
-
-  seed(issue: Partial<LinearIssueNode> & { identifier: string }): LinearIssueNode {
-    const node: LinearIssueNode = {
-      identifier: issue.identifier,
-      title: issue.title ?? "untitled",
-      description: issue.description ?? null,
-      url: issue.url ?? `https://linear.app/x/issue/${issue.identifier}`,
-      priority: issue.priority ?? 0,
-      createdAt: issue.createdAt ?? "2026-01-01T00:00:00.000Z",
-      updatedAt: issue.updatedAt ?? "2026-01-01T00:00:00.000Z",
-      state: issue.state ?? { name: "Todo", type: "unstarted" },
-      labels: issue.labels ?? { nodes: [] },
-      project: issue.project ?? { name: PROJECT },
-      inverseRelations: issue.inverseRelations ?? { nodes: [] },
-    };
-    this.issues.push(node);
-    return node;
-  }
-
-  private withRelations(): LinearIssueNode[] {
-    return this.issues.map((issue) => ({
-      ...issue,
-      inverseRelations: {
-        nodes: this.relations
-          .filter((relation) => relation.blocked === issue.identifier)
-          .map((relation) => ({
-            type: "blocks",
-            issue: { identifier: relation.blocker },
-          })),
-      },
-    }));
-  }
-
-  async request<T>(
-    query: string,
-    variables: Record<string, unknown>,
-    operation: string,
-  ): Promise<T> {
-    if (this.offline) {
-      throw new AxiError("connect ENETUNREACH", "NETWORK_ERROR");
-    }
-    this.calls.push({ operation, query });
-
-    if (query.includes("issues(")) {
-      return {
-        issues: {
-          nodes: this.withRelations(),
-          pageInfo: { hasNextPage: false, endCursor: null },
-        },
-      } as T;
-    }
-    if (query.includes("team(")) {
-      return {
-        team: {
-          id: "team-1",
-          key: TEAM,
-          states: {
-            nodes: [
-              { id: "s-backlog", name: "Backlog", type: "backlog", position: 0 },
-              { id: "s-todo", name: "Todo", type: "unstarted", position: 1 },
-              // Two started states: the lowest position must win, and the
-              // names here are deliberately non-default to prove names are
-              // never matched on.
-              { id: "s-doing", name: "Cooking", type: "started", position: 1 },
-              { id: "s-pr", name: "PR Ready", type: "started", position: 2 },
-              { id: "s-done", name: "Shipped", type: "completed", position: 3 },
-            ],
-          },
-          labels: { nodes: [{ id: "l-fm", name: "fm" }] },
-          projects: { nodes: [{ id: "proj-1", name: PROJECT }] },
-        },
-      } as T;
-    }
-    if (query.includes("issueCreate")) {
-      const input = variables.input as Record<string, unknown>;
-      const stateNode = {
-        "s-todo": { name: "Todo", type: "unstarted" },
-        "s-doing": { name: "Cooking", type: "started" },
-        "s-done": { name: "Shipped", type: "completed" },
-      }[input.stateId as string] ?? { name: "Todo", type: "unstarted" };
-      const node = this.seed({
-        identifier: `${TEAM}-${++this.seq}`,
-        title: input.title as string,
-        description: input.description as string,
-        state: stateNode,
-        priority: Number(input.priority ?? 0),
-        labels: { nodes: labelNodes(input.labelIds as string[] | undefined) },
-      });
-      return { issueCreate: { success: true, issue: node } } as T;
-    }
-    if (query.includes("issueUpdate")) {
-      const id = variables.id as string;
-      const input = variables.input as Record<string, string>;
-      const issue = this.issues.find((node) => node.identifier === id);
-      if (!issue) throw new AxiError("no such issue", "NOT_FOUND");
-      if (input.title !== undefined) issue.title = input.title;
-      if (input.description !== undefined) issue.description = input.description;
-      if (input.stateId !== undefined) {
-        issue.state = {
-          "s-todo": { name: "Todo", type: "unstarted" },
-          "s-doing": { name: "Cooking", type: "started" },
-          "s-done": { name: "Shipped", type: "completed" },
-        }[input.stateId] ?? issue.state;
-      }
-      if (input.priority !== undefined) issue.priority = Number(input.priority);
-      issue.updatedAt = new Date(Date.now() + this.seq).toISOString();
-      return { issueUpdate: { success: true, issue } } as T;
-    }
-    if (query.includes("issueArchive")) {
-      const id = variables.id as string;
-      this.issues = this.issues.filter((node) => node.identifier !== id);
-      return { issueArchive: { success: true } } as T;
-    }
-    if (query.includes("issueLabelCreate")) {
-      const input = variables.input as Record<string, string>;
-      return {
-        issueLabelCreate: {
-          success: true,
-          issueLabel: { id: `l-${input.name}`, name: input.name },
-        },
-      } as T;
-    }
-    if (query.includes("issueRelationCreate")) {
-      const input = variables.input as Record<string, string>;
-      this.relations.push({
-        id: `rel-${this.relations.length + 1}`,
-        blocked: input.relatedIssueId,
-        blocker: input.issueId,
-      });
-      return { issueRelationCreate: { success: true } } as T;
-    }
-    if (query.includes("issueRelationDelete")) {
-      const id = variables.id as string;
-      this.relations = this.relations.filter((relation) => relation.id !== id);
-      return { issueRelationDelete: { success: true } } as T;
-    }
-    if (query.includes("inverseRelations")) {
-      const id = variables.id as string;
-      return {
-        issue: {
-          inverseRelations: {
-            nodes: this.relations
-              .filter((relation) => relation.blocked === id)
-              .map((relation) => ({
-                id: relation.id,
-                type: "blocks",
-                issue: { identifier: relation.blocker },
-              })),
-          },
-        },
-      } as T;
-    }
-    throw new Error(`unhandled query: ${query.slice(0, 60)}`);
-  }
-}
 
 describe("linear backend", () => {
   let dir: string;
@@ -622,6 +430,320 @@ describe("linear backend", () => {
       });
       const { items } = await makeStore().list({});
       expect(items[0]!.kind).toBe("scout");
+    });
+  });
+
+  describe("typed holds", () => {
+    const labelsOf = (identifier: string): string[] =>
+      (
+        fake.issues.find((issue) => issue.identifier === identifier)?.labels
+          .nodes ?? []
+      ).map((node) => node.name);
+
+    it("writes a Hold group label plus the reason and date in fm-meta", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "held", title: "t" });
+      await store.update("held", {
+        hold: { reason: "captain decision pending", kind: "captain", until: "2026-09-10" },
+      });
+
+      // The label is what makes a hold filterable server-side in Linear, and
+      // it is a child of the team's existing `Hold` group, not a flat name.
+      expect(labelsOf("DEV-1")).toContain("Captain");
+      expect(
+        fake.labels.find((label) => label.name === "Captain")?.parent?.name,
+      ).toBe("Hold");
+      const task = await store.get("held");
+      expect(task?.hold).toEqual({
+        reason: "captain decision pending",
+        kind: "captain",
+        until: "2026-09-10",
+      });
+    });
+
+    it("labels an untyped hold with the group's Unspecified child", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "plain", title: "t" });
+      await store.update("plain", { hold: { reason: "waiting" } });
+      // Never the bare group name: Linear rejects assigning a group directly,
+      // which is the live failure this case pins down.
+      expect(labelsOf("DEV-1")).toContain("Unspecified");
+      expect(labelsOf("DEV-1")).not.toContain("Hold");
+    });
+
+    it("reuses a hold child the team already created", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "reuse", title: "t" });
+      await store.update("reuse", { hold: { reason: "r", kind: "external" } });
+      expect(labelsOf("DEV-1")).toContain("External");
+      // `External` predates tasks-axi, so no duplicate is minted.
+      expect(fake.labels.filter((label) => label.name === "External")).toHaveLength(1);
+    });
+
+    it("re-holding with the same kind and reason writes nothing", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "idem", title: "t" });
+      const hold = { reason: "r", kind: "captain" as const };
+      await store.update("idem", { hold });
+
+      fake.reset();
+      const again = await store.update("idem", { hold });
+      // No `changed` fields means no issueUpdate: idempotence is not "write
+      // the same thing twice", it is "do not write at all".
+      expect(again.changed).toEqual([]);
+      expect(fake.calls.some((call) => call.operation === "update")).toBe(false);
+      expect(labelsOf("DEV-1").filter((name) => name === "Captain")).toHaveLength(1);
+    });
+
+    it("swaps the label when the hold kind changes", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "swap", title: "t" });
+      await store.update("swap", { hold: { reason: "r", kind: "captain" } });
+      await store.update("swap", { hold: { reason: "r", kind: "load" } });
+      // A Linear label group is mutually exclusive, and so is a hold kind.
+      expect(labelsOf("DEV-1")).toContain("Load");
+      expect(labelsOf("DEV-1")).not.toContain("Captain");
+    });
+
+    it("clears the label on unhold and leaves the task otherwise intact", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "clear", title: "t", repo: "tasks-axi" });
+      await store.update("clear", { hold: { reason: "r", kind: "external" } });
+      await store.update("clear", { hold: null });
+
+      expect(labelsOf("DEV-1")).not.toContain("External");
+      expect(labelsOf("DEV-1")).toContain("repo/tasks-axi");
+      expect((await store.get("clear"))?.hold).toBeUndefined();
+    });
+
+    it("never assigns the group label itself, which Linear rejects", async () => {
+      // Caught live: a flat label named `hold` collided with the team's
+      // existing `Hold` group and Linear refused the write with "is a group
+      // and cannot be assigned to issues directly". Every hold kind, and the
+      // untyped case, must resolve to a child of that group.
+      const store = makeStore(0);
+      await store.create({ id: "group-safe", title: "t" });
+      for (const kind of ["captain", "external", "load", "parked", "future"] as const) {
+        await store.update("group-safe", { hold: { reason: "r", kind } });
+        expect(labelsOf("DEV-1")).not.toContain("Hold");
+      }
+      await store.update("group-safe", { hold: { reason: "r" } });
+      expect(labelsOf("DEV-1")).not.toContain("Hold");
+      expect(labelsOf("DEV-1")).toContain("Unspecified");
+    });
+
+    it("cleans up a flat hold label written by an earlier build", async () => {
+      fake.seed({
+        identifier: "DEV-7",
+        description: meta("legacy"),
+        labels: { nodes: [{ id: "l-hold/captain", name: "hold/captain" }] },
+      });
+      const store = makeStore(0);
+      await store.update("legacy", { hold: { reason: "r", kind: "parked" } });
+      expect(labelsOf("DEV-7")).not.toContain("hold/captain");
+      expect(labelsOf("DEV-7")).toContain("Parked");
+    });
+
+    it("preserves a human label whose name collides with a hold child", async () => {
+      // A workspace may carry a top-level `Parked` a human created AND the
+      // `Hold` group's own `Parked` child. Reconciling by name conflates the
+      // two and silently drops the human's label on an unrelated update.
+      fake.labels.push({ id: "l-human-parked", name: "Parked" });
+      fake.seed({
+        identifier: "DEV-11",
+        description: meta("collide"),
+        labels: {
+          nodes: [
+            { id: "l-human-parked", name: "Parked" },
+            { id: "l-fm", name: "fm" },
+          ],
+        },
+      });
+      const store = makeStore(0);
+      await store.update("collide", { repo: "tasks-axi" });
+
+      const issue = fake.issues.find((node) => node.identifier === "DEV-11");
+      const ids = (issue?.labels.nodes ?? []).map((node) => node.id);
+      expect(ids).toContain("l-human-parked");
+      expect(ids).not.toContain("l-Parked");
+      expect(labelsOf("DEV-11")).toEqual(
+        expect.arrayContaining(["Parked", "fm", "repo/tasks-axi"]),
+      );
+    });
+
+    it("preserves a workspace label whose id the team tables do not know", async () => {
+      // The `Hold` group is workspace-scoped, so an issue can carry a
+      // workspace-level human `Parked` that is absent from the team's label
+      // table while a `Hold`-group child `Parked` is present in it.
+      fake.seed({
+        identifier: "DEV-12",
+        description: meta("workspace"),
+        labels: {
+          nodes: [
+            { id: "l-workspace-parked", name: "Parked" },
+            { id: "l-fm", name: "fm" },
+          ],
+        },
+      });
+      const store = makeStore(0);
+      await store.update("workspace", { repo: "tasks-axi" });
+
+      const issue = fake.issues.find((node) => node.identifier === "DEV-12");
+      const ids = (issue?.labels.nodes ?? []).map((node) => node.id);
+      expect(ids).toContain("l-workspace-parked");
+      expect(ids).not.toContain("l-Parked");
+    });
+
+    it("preserves labels tasks-axi does not manage", async () => {
+      // A human's own label must survive a hold: `labelIds` is a replacement,
+      // not a merge, so this is the regression that guards it.
+      fake.seed({
+        identifier: "DEV-9",
+        description: meta("human"),
+        labels: { nodes: [{ id: "l-Feature", name: "Feature" }, { id: "l-fm", name: "fm" }] },
+      });
+      const store = makeStore(0);
+      await store.update("human", { hold: { reason: "r", kind: "captain" } });
+      expect(labelsOf("DEV-9")).toEqual(
+        expect.arrayContaining(["Feature", "fm", "Captain"]),
+      );
+    });
+  });
+
+  describe("cross-home mv", () => {
+    const otherStore = (): LinearStore =>
+      new LinearStore({
+        team: TEAM,
+        project: OTHER_PROJECT,
+        cacheTtl: 0,
+        mirrorPath: join(dir, "other", "backlog.md"),
+        client: fake,
+        now: () => "2026-06-01",
+      });
+
+    const projectOfIssue = (identifier: string): string | undefined =>
+      fake.issues.find((issue) => issue.identifier === identifier)?.project?.name;
+
+    it("moves a whole connected set and preserves its blocking edges", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "b", title: "sibling" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      const other = otherStore();
+      const moved = await store.moveManyTo(["a", "b", "c"], other);
+      expect(moved.map((task) => task.id)).toEqual(["a", "b", "c"]);
+
+      // Reassigned, not recreated: the relation is a property of the issue
+      // pair, so the edge survives the move untouched.
+      expect((await store.list({})).items).toEqual([]);
+      const arrived = await other.get("c");
+      expect(arrived?.deps).toEqual([{ type: "blocked-by", id: "a" }]);
+      expect(projectOfIssue("DEV-1")).toBe(OTHER_PROJECT);
+    });
+
+    it("refuses a move that would strand a dependent, naming it", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "b", title: "sibling" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      await expect(store.moveManyTo(["a", "b"], otherStore())).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining("c"),
+      });
+      // Nothing moved: the check runs before any write.
+      expect(projectOfIssue("DEV-1")).toBe(PROJECT);
+      expect(projectOfIssue("DEV-2")).toBe(PROJECT);
+    });
+
+    it("refuses a move whose blocker would be left behind, naming it", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "blocker" });
+      await store.create({ id: "c", title: "dependent" });
+      await store.addDep("c", { type: "blocked-by", id: "a" });
+
+      await expect(store.moveManyTo(["c"], otherStore())).rejects.toMatchObject({
+        code: "VALIDATION_ERROR",
+        message: expect.stringContaining("stranded"),
+      });
+    });
+
+    it("moves the whole set in one batched request", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "t" });
+      await store.create({ id: "b", title: "t" });
+      fake.reset();
+      await store.moveManyTo(["a", "b"], otherStore());
+      // One mutation for the set, not one per issue: a partial failure would
+      // split the very edges the connected-set check protects.
+      expect(fake.calls.filter((call) => call.operation === "mv")).toHaveLength(1);
+    });
+
+    it("refuses a destination that already holds the id", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "dup", title: "t" });
+      const other = otherStore();
+      fake.seed({
+        identifier: "DEV-99",
+        description: meta("dup"),
+        project: { name: OTHER_PROJECT },
+      });
+      await expect(store.moveManyTo(["dup"], other)).rejects.toMatchObject({
+        code: "CONFLICT",
+      });
+    });
+
+    it("lets the next process in either home see the move", async () => {
+      // Caught live: `mv` is the one mutation with nothing to read back, so a
+      // pre-move snapshot survived on disk and the next process in BOTH homes
+      // still listed the old contents for the whole TTL. A long TTL is the
+      // point of the test - a 0 TTL would hide the bug.
+      const store = new LinearStore({
+        team: TEAM,
+        project: PROJECT,
+        cacheTtl: 600,
+        mirrorPath: mirror,
+        client: fake,
+        now: () => "2026-06-01",
+      });
+      await store.create({ id: "a", title: "t" });
+      const otherMirror = join(dir, "other", "backlog.md");
+      const makeOther = (): LinearStore =>
+        new LinearStore({
+          team: TEAM,
+          project: OTHER_PROJECT,
+          cacheTtl: 600,
+          mirrorPath: otherMirror,
+          client: fake,
+          now: () => "2026-06-01",
+        });
+      const other = makeOther();
+      await other.list({});
+      await store.moveManyTo(["a"], other);
+
+      // Fresh stores are fresh processes: only the on-disk cache carries over.
+      const sourceAfter = new LinearStore({
+        team: TEAM,
+        project: PROJECT,
+        cacheTtl: 600,
+        mirrorPath: mirror,
+        client: fake,
+        now: () => "2026-06-01",
+      });
+      expect((await sourceAfter.list({})).items).toEqual([]);
+      expect((await makeOther().list({})).items.map((task) => task.id)).toEqual(["a"]);
+    });
+
+    it("fails loud rather than half-moving when Linear is unreachable", async () => {
+      const store = makeStore(0);
+      await store.create({ id: "a", title: "t" });
+      fake.offline = true;
+      await expect(store.moveManyTo(["a"], otherStore())).rejects.toMatchObject({
+        code: "UNSUPPORTED",
+      });
     });
   });
 

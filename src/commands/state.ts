@@ -1,6 +1,5 @@
 import { isAbsolute, resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
-import { MarkdownStore } from "../backends/markdown.js";
 import {
   parseNonNegativeIntegerFlag,
   requireNoUnknownFlags,
@@ -12,7 +11,12 @@ import {
   takeFlag,
 } from "../args.js";
 import { renderMutation, stateLabel, taskToJson } from "../confirm.js";
-import { requireCtx, type TasksContext } from "../context.js";
+import { createStore, requireCtx, type TasksContext } from "../context.js";
+import {
+  DEFAULT_KEEP,
+  resolveConfig,
+  type ResolvedConfig,
+} from "../config.js";
 import {
   blockedIds,
   byPriorityDesc,
@@ -20,23 +24,18 @@ import {
   readyPublicFollowups,
   readyTasks,
 } from "../derive.js";
-import { AxiError, notFound } from "../errors.js";
+import { AxiError, crossBackendMove, notFound, unsupported } from "../errors.js";
 import { formatCountLine } from "../format.js";
 import { validateDependencyId } from "../id.js";
 import type {
   Dep,
   Hold,
   HoldKind,
-  Task,
-  TaskInput,
   TaskLink,
   TaskPatch,
 } from "../model.js";
 import { HOLD_KINDS } from "../model.js";
-import {
-  PUBLIC_FOLLOWUP_KIND,
-  clonePublicFollowup,
-} from "../public-followup.js";
+import { PUBLIC_FOLLOWUP_KIND } from "../public-followup.js";
 import type { Store } from "../store.js";
 import { getSuggestions } from "../suggestions.js";
 import { renderHelp, renderOutput } from "../toon.js";
@@ -645,38 +644,87 @@ export async function readyCommand(
   return renderOutput(blocks);
 }
 
-function resolveBacklogTarget(to: string): string {
+/**
+ * The destination home named by `--to`.
+ *
+ * A home is a directory, and its own `.tasks.toml` decides its backend - which
+ * is what makes `mv` work between two Linear homes as naturally as between two
+ * markdown files. The destination is resolved from that directory alone, with
+ * every `TASKS_AXI_*` variable dropped: those address the *source* home this
+ * process is running against, and letting them leak would silently point the
+ * destination back at the source. A path that is not a directory is a markdown
+ * backlog file, which keeps the original `--to <file>` form working.
+ */
+function resolveDestinationHome(
+  to: string,
+  makeStore: (config: ResolvedConfig) => Store,
+): {
+  store: Store;
+  config: ResolvedConfig;
+  label: string;
+} {
   const base = isAbsolute(to) ? to : resolve(process.cwd(), to);
   if (existsSync(base) && statSync(base).isDirectory()) {
-    for (const candidate of ["data/backlog.md", "backlog.md"]) {
-      const full = resolve(base, candidate);
-      if (existsSync(full)) return full;
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([key]) => !key.startsWith("TASKS_AXI_"),
+      ),
+    );
+    const config = resolveConfig({ cwd: base, env });
+    if (config.backend !== "markdown") {
+      return { store: makeStore(config), config, label: homeLabel(config) };
     }
-    return resolve(base, "data/backlog.md");
+    // A markdown home keeps its historical `--to <dir>` preference: a firstmate
+    // home's backlog is `data/backlog.md`, and only an explicitly configured
+    // path overrides that.
+    const path = config.pathExplicit ? config.path : legacyBacklogPath(base);
+    const resolved: ResolvedConfig = { ...config, path };
+    return {
+      store: makeStore(resolved),
+      config: resolved,
+      label: resolved.path,
+    };
   }
-  return base;
+  const config: ResolvedConfig = {
+    backend: "markdown",
+    path: base,
+    doneKeep: DEFAULT_KEEP,
+  };
+  return {
+    store: makeStore(config),
+    config,
+    label: base,
+  };
 }
 
-function taskToInput(task: Task): TaskInput {
-  const input: TaskInput = {
-    id: task.id,
-    title: task.title,
-    state: task.state,
-    deps: task.deps.map((dep) => ({ ...dep })),
-    links: task.links.map((link) => ({ ...link })),
-  };
-  if (task.kind) input.kind = task.kind;
-  if (task.repo) input.repo = task.repo;
-  if (task.body) input.body = task.body;
-  if (task.hold) input.hold = { ...task.hold };
-  if (task.priority !== undefined) input.priority = task.priority;
-  input.created = task.created ?? null;
-  if (task.closed) input.closed = task.closed;
-  if (task.public_followup) {
-    input.public_followup = clonePublicFollowup(task.public_followup);
+/**
+ * True when `--to` names the home this process already runs against. A linear
+ * partition is resolved server-side with `eqIgnoreCase`, so its label compares
+ * case-insensitively; a markdown path stays an exact filesystem comparison.
+ */
+function sameHome(
+  destination: ResolvedConfig,
+  fromLabel: string,
+  toLabel: string,
+): boolean {
+  return destination.backend === "linear"
+    ? toLabel.toLowerCase() === fromLabel.toLowerCase()
+    : toLabel === fromLabel;
+}
+
+/** How a home is named in confirmations: its backlog path, or its partition. */
+function homeLabel(config: ResolvedConfig): string {
+  return config.backend === "linear" && config.linear
+    ? `${config.linear.team}/${config.linear.project}`
+    : config.path;
+}
+
+function legacyBacklogPath(dir: string): string {
+  for (const candidate of ["data/backlog.md", "backlog.md"]) {
+    const full = resolve(dir, candidate);
+    if (existsSync(full)) return full;
   }
-  if (task.meta) input.meta = { ...task.meta };
-  return input;
+  return resolve(dir, "data/backlog.md");
 }
 
 export async function mvCommand(
@@ -702,55 +750,46 @@ export async function mvCommand(
   }
   const ids = [...new Set(positionals.map((p) => requireId(p, "id")))];
 
-  const targetPath = resolveBacklogTarget(to);
-  if (resolve(targetPath) === resolve(config.path)) {
+  const destination = resolveDestinationHome(
+    to,
+    context?.storeFactory ?? createStore,
+  );
+  const fromLabel = homeLabel(config);
+  if (destination.config.backend !== config.backend) {
+    // Surfaced rather than half-worked: a task cannot exist in both storage
+    // shapes, so the two homes must share a backend.
+    throw crossBackendMove(config.backend, destination.config.backend);
+  }
+  if (sameHome(destination.config, fromLabel, destination.label)) {
     throw new AxiError(
       "--to resolves to the current backlog",
       "VALIDATION_ERROR",
     );
   }
 
-  const tasks: Task[] = [];
   for (const id of ids) {
-    const task = await store.get(id);
-    if (!task) throw notFound(id, { globals: context?.suggestionGlobals });
-    tasks.push(task);
-  }
-
-  const target = new MarkdownStore({ path: targetPath });
-  for (const id of ids) {
-    if (await target.get(id)) {
-      throw new AxiError(
-        `Task "${id}" already exists in the destination backlog`,
-        "CONFLICT",
-      );
+    if (!(await store.get(id))) {
+      throw notFound(id, { globals: context?.suggestionGlobals });
     }
   }
 
-  if (store instanceof MarkdownStore) {
-    await store.moveManyTo(ids, target);
-  } else if (ids.length === 1) {
-    await target.create(taskToInput(tasks[0]));
-    await store.remove(ids[0]);
-  } else {
-    throw new AxiError(
-      "Moving multiple tasks at once requires the markdown backend",
-      "UNSUPPORTED",
-    );
+  if (!store.moveManyTo) {
+    throw unsupported("mv", store.capabilities().backend);
   }
+  await store.moveManyTo(ids, destination.store);
 
   const single = ids.length === 1;
   return renderMutation({
     json,
     confirm: single
-      ? `mv ${ids[0]} -> ${targetPath}`
-      : `mv ${ids.join(" ")} -> ${targetPath}`,
+      ? `mv ${ids[0]} -> ${destination.label}`
+      : `mv ${ids.join(" ")} -> ${destination.label}`,
     jsonPayload: {
       ok: true,
       action: "mv",
       ...(single ? { id: ids[0] } : { ids }),
-      from: config.path,
-      to: targetPath,
+      from: fromLabel,
+      to: destination.label,
     },
     suggestions: getSuggestions({
       action: "mv",

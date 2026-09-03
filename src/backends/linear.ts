@@ -1,4 +1,5 @@
-import { AxiError, unsupported } from "../errors.js";
+import { rmSync } from "node:fs";
+import { AxiError, crossBackendMove, unsupported } from "../errors.js";
 import { validateDependencyId, validateId } from "../id.js";
 import type {
   Dep,
@@ -39,7 +40,10 @@ import {
 } from "./linear-cache.js";
 import {
   FM_LABEL,
+  REPO_LABEL_PREFIX,
   TYPE_FOR_STATE,
+  holdLabel,
+  isHoldLabel,
   priorityToLinear,
   repoLabel,
   slugTable,
@@ -51,6 +55,7 @@ import { readMirrorTasks, renderMirror } from "./linear-mirror.js";
 import {
   BLOCKERS_QUERY,
   ISSUE_ARCHIVE_MUTATION,
+  ISSUE_BATCH_UPDATE_MUTATION,
   ISSUE_CREATE_MUTATION,
   ISSUE_UPDATE_MUTATION,
   LABEL_CREATE_MUTATION,
@@ -110,7 +115,12 @@ interface ResolveTables {
   teamId: string;
   projectId: string;
   states: { id: string; name: string; type: string; position: number }[];
-  labels: { id: string; name: string }[];
+  labels: {
+    id: string;
+    name: string;
+    isGroup?: boolean;
+    parent?: { name: string } | null;
+  }[];
 }
 
 function today(): string {
@@ -166,6 +176,7 @@ export class LinearStore implements Store {
       // travels in `fm-meta`, so the CLI's id handling is unchanged.
       serverMintsIds: false,
       publicFollowups: true,
+      crossHomeMove: true,
     };
   }
 
@@ -313,10 +324,27 @@ export class LinearStore implements Store {
     return snapshot.issues.map((issue) => toTask(issue, slugs));
   }
 
-  /** Drop the cached snapshot so the next read reflects a write we just made. */
+  /**
+   * Drop the cached snapshot so the next read reflects a write we just made -
+   * in this process *and* in the next one.
+   *
+   * Dropping only the in-memory copy is not enough. Most commands read back
+   * after writing, which refreshes the on-disk cache as a side effect, but a
+   * command that does not (`mv` moves a set and reports, without re-reading)
+   * would leave a pre-write snapshot on disk for the whole TTL, and the next
+   * process would serve it and show the write as not having happened. Caught
+   * live: after a successful cross-home move, both homes still listed the old
+   * contents. Deleting the file is safe because it is derived data, and the
+   * offline read path falls back to the markdown mirror.
+   */
   private invalidate(): void {
     this.snapshot = undefined;
     this.mustRefetch = true;
+    try {
+      rmSync(this.cachePath, { force: true });
+    } catch {
+      // A cache we cannot delete is a cache the next read revalidates anyway.
+    }
   }
 
   /**
@@ -403,34 +431,144 @@ export class LinearStore implements Store {
   }
 
   /**
-   * Label ids for an issue, creating a missing label rather than failing: a
-   * `repo/<name>` label is derived from the task, not chosen from a menu, so a
-   * new repo must not need a human to pre-create its label in Linear.
+   * The full label set an issue should carry, as ids.
+   *
+   * Linear's `labelIds` is a replacement, not a merge, so this reconciles
+   * rather than overwrites: every label tasks-axi does not manage is carried
+   * through untouched (a human's `Feature` or `AFK` label must survive a
+   * `hold`), and the three managed families - `fm`, `repo/<name>`, and the
+   * children of the `Hold` group (plus legacy flat `hold`/`hold/<kind>` names)
+   * - are rewritten from the task. Dropping a managed label is how `unhold`
+   * removes the `Hold` group's `Captain` child.
    */
-  private async labelIds(
+  private async labelIdsFor(
     tables: ResolveTables,
-    repo: string | undefined,
+    task: { repo?: string; hold?: Task["hold"] },
+    existing: { id?: string; name: string }[] = [],
   ): Promise<string[]> {
-    const wanted = [FM_LABEL, ...(repo ? [repoLabel(repo)] : [])];
+    // Reconciliation is by label IDENTITY, never by name: a workspace may hold
+    // a top-level human `Parked` and a `Hold`-group child `Parked`. A label id
+    // the team tables do not know cannot have its group determined, so it is
+    // preserved untouched rather than guessed at by name.
+    const record = (label: { id?: string; name: string }) =>
+      label.id !== undefined
+        ? tables.labels.find((candidate) => candidate.id === label.id)
+        : tables.labels.find(
+            (candidate) =>
+              candidate.name.toLowerCase() === label.name.toLowerCase(),
+          );
+    const managedName = (name: string, parent?: string): boolean =>
+      name.toLowerCase() === FM_LABEL ||
+      name.toLowerCase().startsWith(REPO_LABEL_PREFIX) ||
+      isHoldLabel(name, parent);
+    const hold = holdLabel(task.hold);
+    const kept: string[] = [];
+    const unresolved: string[] = [];
+    for (const label of existing) {
+      const resolved = record(label);
+      if (!resolved) {
+        if (managedName(label.name)) continue;
+        if (label.id !== undefined) kept.push(label.id);
+        else unresolved.push(label.name);
+        continue;
+      }
+      if (!managedName(resolved.name, resolved.parent?.name)) {
+        kept.push(resolved.id);
+      }
+    }
+    const ids = [
+      ...kept,
+      ...(await this.ensureLabelIds(tables, [
+        ...unresolved,
+        FM_LABEL,
+        ...(task.repo ? [repoLabel(task.repo)] : []),
+      ])),
+    ];
+    if (hold) ids.push(await this.holdLabelId(tables, hold));
+    return [...new Set(ids)];
+  }
+
+  /**
+   * The id of the `Hold` group child for a hold kind, creating the group and
+   * the child if the team does not have them yet. Nesting under the group is
+   * what makes the label assignable at all - Linear rejects a flat label whose
+   * name collides with a group - and makes hold kinds mutually exclusive.
+   */
+  private async holdLabelId(
+    tables: ResolveTables,
+    hold: { group: string; name: string },
+  ): Promise<string> {
+    const group = tables.labels.find(
+      (label) =>
+        label.name.toLowerCase() === hold.group.toLowerCase() && label.isGroup,
+    );
+    const groupId =
+      group?.id ??
+      (await this.createLabel(tables, hold.group, undefined, true)).id;
+    const existing = tables.labels.find(
+      (label) =>
+        label.name.toLowerCase() === hold.name.toLowerCase() &&
+        label.parent?.name.toLowerCase() === hold.group.toLowerCase(),
+    );
+    if (existing) return existing.id;
+    return (await this.createLabel(tables, hold.name, groupId, false)).id;
+  }
+
+  private async createLabel(
+    tables: ResolveTables,
+    name: string,
+    parentId: string | undefined,
+    isGroup: boolean,
+  ): Promise<{ id: string; name: string }> {
+    const created = await this.request<{
+      issueLabelCreate: {
+        success: boolean;
+        issueLabel: { id: string; name: string; parent?: { name: string } | null };
+      };
+    }>(
+      LABEL_CREATE_MUTATION,
+      {
+        input: {
+          name,
+          // A child inherits its parent's scope. The `Hold` group is a
+          // workspace label here, and Linear refuses "a label to a group from a
+          // different team", so a nested label must NOT carry a teamId - only a
+          // top-level label this backend mints itself is team-scoped.
+          ...(parentId ? { parentId } : { teamId: tables.teamId }),
+        },
+      },
+      "label",
+    );
+    const label = created.issueLabelCreate.issueLabel;
+    tables.labels.push({
+      ...label,
+      isGroup,
+      parent: label.parent ?? null,
+    });
+    return label;
+  }
+
+  /**
+   * Resolve label names to ids, creating a missing label rather than failing:
+   * a `repo/<name>` or `hold/<kind>` label is derived from the task, not
+   * chosen from a menu, so a new repo or hold kind must not need a human to
+   * pre-create its label in Linear.
+   */
+  private async ensureLabelIds(
+    tables: ResolveTables,
+    names: string[],
+  ): Promise<string[]> {
     const ids: string[] = [];
-    for (const name of wanted) {
+    for (const name of [...new Set(names)]) {
       const existing = tables.labels.find(
         (label) => label.name.toLowerCase() === name.toLowerCase(),
       );
       if (existing) {
-        ids.push(existing.id);
+        if (!ids.includes(existing.id)) ids.push(existing.id);
         continue;
       }
-      const created = await this.request<{
-        issueLabelCreate: { success: boolean; issueLabel: { id: string; name: string } };
-      }>(
-        LABEL_CREATE_MUTATION,
-        { input: { name, teamId: tables.teamId } },
-        "label",
-      );
-      const label = created.issueLabelCreate.issueLabel;
-      tables.labels.push(label);
-      ids.push(label.id);
+      const label = await this.createLabel(tables, name, undefined, false);
+      if (!ids.includes(label.id)) ids.push(label.id);
     }
     return ids;
   }
@@ -468,6 +606,19 @@ export class LinearStore implements Store {
       );
     }
     return { key, task };
+  }
+
+  /**
+   * The labels an issue currently carries, with ids. A mutation runs after
+   * `requireOnline`, so this reads the snapshot that call just fetched and
+   * costs no extra request.
+   */
+  private async currentLabels(
+    key: string,
+  ): Promise<{ id?: string; name: string }[]> {
+    const snapshot = await this.load();
+    const issue = snapshot?.issues.find((node) => node.identifier === key);
+    return issue?.labels.nodes.map((node) => ({ id: node.id, name: node.name })) ?? [];
   }
 
   // -------------------------------------------------------------------------
@@ -535,7 +686,7 @@ export class LinearStore implements Store {
           description: renderDescription(draft),
           stateId: this.stateId(tables, state),
           priority: priorityToLinear(draft.priority),
-          labelIds: await this.labelIds(tables, draft.repo),
+          labelIds: await this.labelIdsFor(tables, draft),
         },
       },
       "create",
@@ -699,8 +850,14 @@ export class LinearStore implements Store {
     if (changed.includes("priority")) {
       input.priority = priorityToLinear(next.priority);
     }
-    if (changed.includes("repo")) {
-      input.labelIds = await this.labelIds(tables, next.repo);
+    if (changed.includes("repo") || changed.includes("hold")) {
+      // A hold is filterable server-side because it is also a label; the
+      // reconciliation keeps every label tasks-axi does not manage.
+      input.labelIds = await this.labelIdsFor(
+        tables,
+        next,
+        await this.currentLabels(key),
+      );
     }
     await this.request(ISSUE_UPDATE_MUTATION, { id: key, input }, "update");
 
@@ -1012,6 +1169,154 @@ export class LinearStore implements Store {
     this.invalidate();
     const snapshot = await this.fetchSnapshot();
     return snapshot.issues.length;
+  }
+
+  // -------------------------------------------------------------------------
+  // Cross-home move
+  // -------------------------------------------------------------------------
+
+  /**
+   * Move a connected set of tasks into another Linear home.
+   *
+   * A home's partition is its project, so the move is a project reassignment
+   * rather than a copy-and-delete: the issue keeps its identity, its history,
+   * and - crucially - its blocking relations, which are properties of the
+   * issue pair and not of the project. That is what preserves dependency edges
+   * for free where the markdown backend has to re-render them.
+   *
+   * It is atomic because `issueBatchUpdate` reassigns the whole set in one
+   * server-side request. A per-issue loop could fail halfway and leave one end
+   * of a `blocked-by` edge in each home, which is exactly the split the
+   * connected-set check below exists to prevent.
+   */
+  async moveManyTo(ids: string[], targetStore: Store): Promise<Task[]> {
+    const target = requireLinearTarget(targetStore);
+    const uniqueIds = [...new Set(ids)];
+    await this.requireOnline(`move ${uniqueIds.join(", ")}`);
+
+    const all = (await this.list({})).items;
+    const moving = uniqueIds.map((id) => {
+      const task = all.find((candidate) => candidate.id === id);
+      if (!task) throw new AxiError(`Task "${id}" not found`, "NOT_FOUND");
+      return task;
+    });
+
+    const destination = (await target.list({})).items;
+    for (const id of uniqueIds) {
+      if (destination.some((task) => task.id === id)) {
+        throw new AxiError(
+          `Task "${id}" already exists in the destination home`,
+          "CONFLICT",
+        );
+      }
+    }
+
+    requireNoSplitDeps(all, destination, uniqueIds);
+
+    const tables = await target.resolveTables();
+    const uuids = moving.map((task) => this.requireIssueUuid(task));
+    await this.request(
+      ISSUE_BATCH_UPDATE_MUTATION,
+      {
+        ids: uuids,
+        input: {
+          projectId: tables.projectId,
+          // A cross-team move is legitimate (two homes may live in different
+          // Linear teams); Linear re-keys the identifier, which costs nothing
+          // because the tasks-axi slug is the join key.
+          ...(target.team.toLowerCase() === this.team.toLowerCase()
+              ? {}
+              : { teamId: tables.teamId }),
+        },
+      },
+      "mv",
+    );
+
+    this.invalidate();
+    target.invalidate();
+    // Re-sync both homes now rather than leaving each with no cache and no
+    // mirror: a move is the one mutation with nothing to read back, and the
+    // next command in either home would otherwise pay for the refetch and
+    // find no mirror to fall back on offline.
+    this.snapshot = await this.fetchSnapshot();
+    target.snapshot = await target.fetchSnapshot();
+    return moving;
+  }
+
+  /** Linear's UUID for a task, which is what a batch mutation addresses. */
+  private requireIssueUuid(task: Task): string {
+    const uuid = task.meta?.linear_uuid;
+    if (typeof uuid !== "string" || uuid === "") {
+      throw new AxiError(
+        `Task "${task.id}" has no Linear issue id`,
+        "UNKNOWN",
+        ["Run `tasks-axi render` to refresh the snapshot, then retry"],
+      );
+    }
+    return uuid;
+  }
+}
+
+/**
+ * A linear home can only move tasks into another linear home. The destination
+ * arrives through the `Store` seam so the CLI stays backend-agnostic, which
+ * means the backend has to assert its own type here.
+ */
+function requireLinearTarget(target: Store): LinearStore {
+  if (target instanceof LinearStore) return target;
+  throw crossBackendMove("linear", target.capabilities().backend);
+}
+
+/**
+ * Refuse any move that would split a dependency edge across two homes, naming
+ * the stranded id. This mirrors `MarkdownStore.requireNoSplitDeps` exactly,
+ * because the rule is a property of the task graph rather than of a storage
+ * format: a whole connected set moves together, or nothing moves.
+ */
+function requireNoSplitDeps(
+  source: Task[],
+  destination: Task[],
+  ids: string[],
+): void {
+  const movedSet = new Set(ids);
+
+  // (a) An active dependent left behind would point across homes at a blocker
+  //     that is no longer in its partition.
+  for (const id of ids) {
+    const stranded = source
+      .filter(
+        (task) =>
+          !movedSet.has(task.id) &&
+          task.state !== "done" &&
+          task.deps.some((dep) => dep.type === "blocked-by" && dep.id === id),
+      )
+      .map((task) => task.id);
+    if (stranded.length > 0) {
+      throw new AxiError(
+        `Task "${id}" is still blocking active tasks: ${stranded.join(", ")}`,
+        "VALIDATION_ERROR",
+        [
+          `Move them together, or unblock them first, e.g. \`tasks-axi unblock ${stranded[0]} --by ${id}\``,
+        ],
+      );
+    }
+  }
+
+  // (b) A moved item's blocker must travel with it or already be in the
+  //     destination; otherwise its `blocked-by` edge dangles across homes.
+  for (const task of source.filter((candidate) => movedSet.has(candidate.id))) {
+    for (const dep of task.deps) {
+      if (movedSet.has(dep.id)) continue;
+      if (destination.some((candidate) => candidate.id === dep.id)) continue;
+      const label = dep.type === "blocked-by" ? "blocker" : "dependency";
+      throw new AxiError(
+        `Cannot move "${task.id}": its ${label} "${dep.id}" would be stranded (not in the moved set and absent from the destination)`,
+        "VALIDATION_ERROR",
+        [
+          `Add "${dep.id}" to the same \`mv\`, or move it to the destination first`,
+        ],
+      );
+    }
   }
 }
 

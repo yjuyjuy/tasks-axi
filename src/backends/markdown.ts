@@ -6,7 +6,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { AxiError } from "../errors.js";
+import { AxiError, crossBackendMove } from "../errors.js";
 import { validateDependencyId, validateId } from "../id.js";
 import type {
   Dep,
@@ -358,6 +358,7 @@ export class MarkdownStore implements Store {
       customStates: true,
       serverMintsIds: false,
       publicFollowups: true,
+      crossHomeMove: true,
     };
   }
 
@@ -852,7 +853,8 @@ export class MarkdownStore implements Store {
    * endpoints travel together; `requireNoSplitDeps` refuses any move that would
    * strand a link across the two files.
    */
-  async moveManyTo(ids: string[], target: MarkdownStore): Promise<Task[]> {
+  async moveManyTo(ids: string[], targetStore: Store): Promise<Task[]> {
+    const target = requireMarkdownTarget(targetStore);
     const uniqueIds = [...new Set(ids)];
     return withLocks([this.path, target.path], () => {
       const loaded = this.loadForUpdate();
@@ -1306,4 +1308,14 @@ export class MarkdownStore implements Store {
       return count;
     });
   }
+}
+
+/**
+ * A markdown home can only move tasks into another markdown home. The
+ * destination arrives through the `Store` seam so the CLI stays
+ * backend-agnostic, which means the backend has to assert its own type here.
+ */
+function requireMarkdownTarget(target: Store): MarkdownStore {
+  if (target instanceof MarkdownStore) return target;
+  throw crossBackendMove("markdown", target.capabilities().backend);
 }

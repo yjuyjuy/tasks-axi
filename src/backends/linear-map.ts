@@ -1,4 +1,4 @@
-import type { State, Task, TaskLink } from "../model.js";
+import type { Hold, State, Task, TaskLink } from "../model.js";
 import { deriveLinks, leadingKind } from "./markdown-grammar.js";
 import { parseDescription } from "./linear-meta.js";
 
@@ -43,9 +43,60 @@ export function stateForType(type: string): State {
 export const REPO_LABEL_PREFIX = "repo/";
 /** Every issue this backend owns carries the fleet label. */
 export const FM_LABEL = "fm";
+/**
+ * Holds are expressed as a Linear **label group**, not as flat `hold/<kind>`
+ * names.
+ *
+ * This is Linear's own convention for exactly this shape, and the DEV team was
+ * already using it - a `Hold` group with `External`, `Parked`, `Future`
+ * children - before tasks-axi wrote anything. Two things follow. A flat label
+ * named `hold` is *rejected* by the API when a `Hold` group exists ("is a group
+ * and cannot be assigned to issues directly"), and a group is mutually
+ * exclusive in Linear's UI, so an issue can never carry two hold kinds at once.
+ * Reusing the group therefore fixes a real failure and makes a hold filterable
+ * with the team's existing saved views.
+ *
+ * `fm-meta` stays the authoritative record of the reason and the `until` date,
+ * which Linear has no column for; the label is the filterable projection.
+ */
+export const HOLD_GROUP = "Hold";
+/** A hold with no kind still has to be filterable, so it gets its own child. */
+export const HOLD_UNSPECIFIED = "Unspecified";
+/** Legacy flat names an earlier build could have written; recognized so they are cleaned up. */
+const LEGACY_HOLD_PREFIX = "hold";
+
+/** A hold label is `<Hold group>/<Kind>`; the child name carries the kind. */
+export interface HoldLabelRef {
+  group: string;
+  name: string;
+}
 
 export function repoLabel(repo: string): string {
   return `${REPO_LABEL_PREFIX}${repo}`;
+}
+
+/**
+ * The group child a hold should map to, or undefined when the task is not held.
+ * The child name is title-cased to match the sibling labels a human created.
+ */
+export function holdLabel(hold: Hold | undefined): HoldLabelRef | undefined {
+  if (!hold) return undefined;
+  const kind = hold.kind ?? HOLD_UNSPECIFIED;
+  return {
+    group: HOLD_GROUP,
+    name: kind.charAt(0).toUpperCase() + kind.slice(1).toLowerCase(),
+  };
+}
+
+/**
+ * True for a label this backend manages as a hold: any child of the `Hold`
+ * group, plus the flat `hold` / `hold/<kind>` names an earlier build wrote, so
+ * a stale one is cleaned up on the next hold write rather than lingering.
+ */
+export function isHoldLabel(name: string, parent?: string): boolean {
+  if (parent && parent.toLowerCase() === HOLD_GROUP.toLowerCase()) return true;
+  const lower = name.toLowerCase();
+  return lower === LEGACY_HOLD_PREFIX || lower.startsWith(`${LEGACY_HOLD_PREFIX}/`);
 }
 
 function repoFromLabels(labels: string[]): string | undefined {
@@ -76,6 +127,8 @@ export function priorityFromLinear(priority: number): number | undefined {
 
 /** The shape of a Linear issue this backend reads; a subset of the client type. */
 export interface LinearIssueNode {
+  /** Linear's UUID. Batch mutations address issues by UUID, not identifier. */
+  id?: string;
   identifier: string;
   title: string;
   description: string | null;
@@ -84,7 +137,7 @@ export interface LinearIssueNode {
   createdAt: string;
   updatedAt: string;
   state: { name: string; type: string };
-  labels: { nodes: { name: string }[] };
+  labels: { nodes: { id?: string; name: string }[] };
   project?: { name: string } | null;
   /** Edges pointing at this issue: a `blocks` inverse edge means "blocked by". */
   inverseRelations: {
@@ -144,6 +197,7 @@ export function toTask(issue: LinearIssueNode, slugs: SlugTable): Task {
       }),
     meta: {
       linear_id: issue.identifier,
+      ...(issue.id ? { linear_uuid: issue.id } : {}),
       linear_url: issue.url,
       linear_state: issue.state.name,
       linear_state_type: issue.state.type,
